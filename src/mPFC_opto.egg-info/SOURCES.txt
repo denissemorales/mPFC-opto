@@ -1,8 +1,0 @@
-README.md
-pyproject.toml
-src/behavior/__init__.py
-src/behavior/wtrack_tables_dmr.py
-src/mPFC_opto.egg-info/PKG-INFO
-src/mPFC_opto.egg-info/SOURCES.txt
-src/mPFC_opto.egg-info/dependency_links.txt
-src/mPFC_opto.egg-info/top_level.txt
