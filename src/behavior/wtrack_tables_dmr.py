@@ -411,6 +411,42 @@ class PositionValidator:
             - 'invalid_pokes': DataFrame with rejected pokes.
             - 'summary': dict with statistics.
         """
+
+        # ----------------------------------
+        # EARLY EXIT: no position data
+        # ----------------------------------
+        if (
+            position_times is None
+            or position_x is None
+            or position_y is None
+            or len(position_times) == 0
+        ):
+            poke_df = pd.DataFrame(
+                {
+                    "time": poke_times,
+                    "well_name": poke_names,
+                    "value": (
+                        poke_values
+                        if poke_values is not None
+                        else np.ones(len(poke_times), dtype=int)
+                    ),
+                }
+            )
+
+            summary = {
+                "total_pokes": len(poke_df),
+                "valid_pokes": len(poke_df),
+                "invalid_pokes": 0,
+                "percent_valid": 100.0 if len(poke_df) else 0,
+                "note": "Position validation skipped (no position data)",
+            }
+
+            return {
+                "valid_pokes": poke_df.reset_index(drop=True),
+                "invalid_pokes": poke_df.iloc[0:0],
+                "summary": summary,
+            }
+
         if poke_values is None:
             poke_values = np.ones(len(poke_times), dtype=int)
 

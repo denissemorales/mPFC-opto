@@ -1,0 +1,10 @@
+[project]
+name = "mPFC-opto"
+version = "0.1.0"
+readme = "README.md"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
