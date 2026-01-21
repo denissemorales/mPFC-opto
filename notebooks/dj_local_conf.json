@@ -1,0 +1,58 @@
+{
+    "database.host": "lmf-db.cin.ucsf.edu",
+    "database.password": "forgetmenot",
+    "database.user": "denissemorales",
+    "database.port": 3306,
+    "database.reconnect": true,
+    "connection.init_function": null,
+    "connection.charset": "",
+    "loglevel": "INFO",
+    "safemode": true,
+    "fetch_format": "array",
+    "display.limit": 12,
+    "display.width": 14,
+    "display.show_tuple_count": true,
+    "database.use_tls": true,
+    "enable_python_native_blobs": true,
+    "filepath_checksum_size_limit": 1073741824,
+    "stores": {
+        "raw": {
+            "protocol": "file",
+            "location": "/stelmo/nwb/raw",
+            "stage": "/stelmo/nwb/raw"
+        },
+        "analysis": {
+            "protocol": "file",
+            "location": "/stelmo/nwb/analysis",
+            "stage": "/stelmo/nwb/analysis"
+        }
+    },
+    "custom": {
+        "debug_mode": "false",
+        "test_mode": "false",
+        "database.prefix": "denissemorales",
+        "spyglass_dirs": {
+            "base": "/stelmo/nwb",
+            "raw": "/stelmo/nwb/raw",
+            "analysis": "/stelmo/nwb/analysis",
+            "recording": "/stelmo/nwb/recording",
+            "sorting": "/stelmo/nwb/spikesorting",
+            "waveforms": "/stelmo/nwb/waveforms",
+            "temp": "/stelmo/nwb/tmp",
+            "video": "/stelmo/nwb/video",
+            "export": "/stelmo/nwb/export"
+        },
+        "kachery_dirs": {
+            "cloud": "/stelmo/nwb/.kachery-cloud",
+            "storage": "/stelmo/nwb/kachery_storage",
+            "temp": "/stelmo/nwb/tmp"
+        },
+        "dlc_dirs": {
+            "base": "/stelmo/nwb/deeplabcut/",
+            "project": "/stelmo/nwb/deeplabcut/projects",
+            "video": "/stelmo/nwb/deeplabcut/video",
+            "output": "/stelmo/nwb/deeplabcut/output"
+        },
+        "kachery_zone": "franklab.default"
+    }
+}
