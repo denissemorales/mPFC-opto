@@ -1010,3 +1010,71 @@ def interpolate_position(position_times, position_x, position_y, query_times):
     interp_y = np.interp(query_times, position_times, position_y)
 
     return np.column_stack((interp_x, interp_y))
+
+def compute_performance(final_df, window=10, trial_types=None):
+    """
+    Compute trial-by-trial correctness and smoothed probability correct
+    using a rolling window average.
+
+    A trial is correct if both pump_triggered == True and
+    position_valid == True.
+
+    Parameters
+    ----------
+    final_df : pd.DataFrame
+        Trial-level DataFrame from ForktTrackEvents (forktrack_results).
+        Expected columns: 'time', 'well_name', 'pump_triggered',
+        'position_valid', 'trial_type', 'transition', 'epoch'.
+    window : int
+        Number of trials for the rolling window (default 10).
+    trial_types : list of str, optional
+        Subset of trial types to include, e.g. ['Inbound'], ['Outbound'],
+        or ['Inbound', 'Outbound']. If None, all trial types are included.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per trial with columns:
+        - all original columns from final_df
+        - 'correct': bool, True if pump_triggered and position_valid
+        - 'trial_num': int, global trial index (1-based)
+        - 'trial_num_per_type': int, per-trial-type trial index (1-based)
+        - 'p_correct_smooth': float, rolling window probability correct
+          (overall, across all included trials)
+        - 'p_correct_smooth_per_type': float, rolling window probability
+          correct computed separately per trial type (Inbound vs Outbound)
+    """
+    df = final_df.copy()
+
+    # Only include poke wells (exclude pumps if present)
+    df = df[df["well_name"].str.contains("poke")].reset_index(drop=True)
+
+    if trial_types is not None:
+        df = df[df["trial_type"].isin(trial_types)].reset_index(drop=True)
+
+    # Correctness: both reward delivered and position confirmed
+    df["correct"] = df["pump_triggered"] & df["position_valid"]
+
+    # Global trial index
+    df["trial_num"] = np.arange(1, len(df) + 1)
+
+    # Per-trial-type trial index
+    df["trial_num_per_type"] = df.groupby("trial_type").cumcount() + 1
+
+    # Global rolling probability correct (min_periods=1 to avoid NaNs at start)
+    df["p_correct_smooth"] = (
+        df["correct"]
+        .astype(float)
+        .rolling(window=window, min_periods=1)
+        .mean()
+    )
+
+    # Per-trial-type rolling probability correct
+    df["p_correct_smooth_per_type"] = (
+        df.groupby("trial_type")["correct"]
+        .transform(
+            lambda x: x.astype(float).rolling(window=window, min_periods=1).mean()
+        )
+    )
+
+    return df.reset_index(drop=True)
