@@ -11,6 +11,7 @@ Date: March 2026
 import datajoint as dj
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
@@ -24,8 +25,8 @@ from spyglass.position.position_merge import PositionOutput
 from spyglass.utils import SpyglassMixin
 
 schema = dj.schema("denissemorales_sleepscoring")
-
 VALID_METHODS = {"gmm", "kmeans", "hierarchical"}
+
 
 @schema
 class SleepScoringParams(SpyglassMixin, dj.Lookup):
@@ -53,6 +54,8 @@ class SleepScoringParams(SpyglassMixin, dj.Lookup):
     speed_threshold: float           # Speed threshold for wake detection (cm/s)
     use_speed_for_wake: bool         # Use speed instead of EMG for wake detection
     """
+
+    # dj.Lookup: contents are auto-inserted on table creation; no insert_default needed
     contents = [
         {
             "sleep_scoring_params_name": "hierarchical",
@@ -70,7 +73,6 @@ class SleepScoringParams(SpyglassMixin, dj.Lookup):
         }
     ]
 
-    # CB: Override insert1 for input validation instead of relying on enum
     def insert1(self, row, **kwargs):
         method = row.get("method")
         if method not in VALID_METHODS:
@@ -86,15 +88,12 @@ class SleepScoringSelection(SpyglassMixin, dj.Manual):
     -> SleepScoringParams
     target_interval_list_name: varchar(64)
     nwb_file_name: varchar(64)
-    -> [nullable] lfp_band.LFPBandV1.proj(theta_lfp_merge_id='lfp_merge_id',
-                                           theta_filter_name='filter_name')
-    -> [nullable] lfp_band.LFPBandV1.proj(delta_lfp_merge_id='lfp_merge_id',
-                                           delta_filter_name='filter_name')
+    theta_filter_name='': varchar(64)
+    delta_filter_name='': varchar(64)
+    lfp_merge_id: uuid               # Shared LFP merge ID (theta and delta use different filter_names on the same merge)
     ---
-    # CB: FK-ref optional EMG / PSS entries in LFPOutput rather than storing
-    #     bare merge IDs.  proj() lets us rename to avoid collisions.
-    -> [nullable] lfp.LFPOutput.proj(emg_merge_id='merge_id')
-    -> [nullable] lfp.LFPOutput.proj(pss_merge_id='merge_id')
+    emg_merge_id=null: uuid          # Optional EMG band power merge ID
+    pss_merge_id=null: uuid          # Optional PSS merge ID
 
     # Position merge
     pos_merge_id: uuid               # PositionOutput merge ID
@@ -112,8 +111,8 @@ class SleepScoring(SpyglassMixin, dj.Computed):
     definition = """
     -> SleepScoringSelection
     ---
-    state_labels: blob               # Array of state labels (0=NREM, 1=REM, 2=WAKE)
-    timestamps: blob                 # Timestamps for state labels
+    state_labels: longblob               # Array of state labels (0=NREM, 1=REM, 2=WAKE)
+    timestamps: longblob                 # Timestamps for state labels
     nrem_duration: float             # Total NREM duration (seconds)
     rem_duration: float              # Total REM duration (seconds)
     wake_duration: float             # Total WAKE duration (seconds)
@@ -146,7 +145,7 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         theta_df = (
             lfp_band.LFPBandV1
             & {
-                "lfp_merge_id": sel["theta_lfp_merge_id"],
+                "lfp_merge_id": sel["lfp_merge_id"],
                 "filter_name": sel["theta_filter_name"],
             }
         ).fetch1_dataframe()
@@ -157,7 +156,7 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         delta_df = (
             lfp_band.LFPBandV1
             & {
-                "lfp_merge_id": sel["delta_lfp_merge_id"],
+                "lfp_merge_id": sel["lfp_merge_id"],
                 "filter_name": sel["delta_filter_name"],
             }
         ).fetch1_dataframe()
@@ -272,27 +271,27 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         }
 
     def _store_results(self, key, result, nwb_file_name):
-        """Write results to the NWB file and insert the DB row."""
-        sleep_results = {
-            "intervals": result["intervals"],
-            "state_labels": result["states"],
-            "timestamps": result["timestamps"],
-            "durations": {
-                "nrem": result["nrem_duration"],
-                "rem": result["rem_duration"],
-                "wake": result["wake_duration"],
-            },
-            "percentages": {
-                "nrem": result["nrem_percentage"],
-                "rem": result["rem_percentage"],
-                "wake": result["wake_percentage"],
-            },
-            "params_name": result["params_name"],
-        }
+        """Write results to the NWB file and insert the DB row.
 
+        add_nwb_object requires an object with a .name attribute.
+        Spyglass natively wraps np.ndarray in ScratchData, so we store
+        state_labels and timestamps as separate named arrays.
+        """
+    def _store_results(self, key, result, nwb_file_name):
+        """Write results to the NWB file and insert the DB row.
+
+        Uses the context manager pattern so AnalysisNwbfile registration
+        (and the FK ref) is handled automatically. Pass arrays directly
+        rather than a dict since add_nwb_object requires an np.ndarray.
+        """
         with AnalysisNwbfile().build(nwb_file_name) as builder:
-            obj_id = builder.add_nwb_object(sleep_results)
-            analysis_file = builder.analysis_file_name
+            obj_id = builder.add_nwb_object(
+                result["states"].astype(np.int32), table_name="state_labels"
+            )
+            builder.add_nwb_object(
+                result["timestamps"], table_name="timestamps"
+            )
+            analysis_file_name = builder.analysis_file_name
 
         self.insert1(
             {
@@ -305,11 +304,10 @@ class SleepScoring(SpyglassMixin, dj.Computed):
                 "nrem_percentage": result["nrem_percentage"],
                 "rem_percentage": result["rem_percentage"],
                 "wake_percentage": result["wake_percentage"],
-                "analysis_file_name": analysis_file,
+                "analysis_file_name": analysis_file_name,
                 "trial_object_id": obj_id,
             }
         )
-
     # ==================== Feature Preparation ====================
 
     def _prepare_features(
@@ -572,7 +570,6 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             "nwb_file_name": self.fetch1("nwb_file_name"),
             "interval_list_name": interval_name,
         }
-
         return (IntervalList & key).fetch_interval()
 
     def fetch_nrem_times(self):
