@@ -46,7 +46,7 @@ class SleepScoringParams(SpyglassMixin, dj.Lookup):
     # Constraint parameters
     apply_constraints: bool          # Apply physiological constraints
     rem_cannot_follow_wake: bool     # REM cannot directly follow WAKE
-    constraint_max_iterations: int   # Max iterations for constraint enforcement
+    constraint_max_iterations: int    # Max iterations for constraint enforcement
 
     # State duration parameters
     min_duration: float              # Minimum state bout duration (seconds)
@@ -56,14 +56,12 @@ class SleepScoringParams(SpyglassMixin, dj.Lookup):
     use_speed_for_wake: bool         # Use speed instead of EMG for wake detection
     """
 
-    # dj.Lookup: contents are auto-inserted on table creation; no insert_default needed
     contents = [
         {
             "sleep_scoring_params_name": "hierarchical",
             "method": "hierarchical",
             "use_hierarchical": True,
-            "use_pss": False,
-            "power_smoothing": 0.5,
+            "use_pss": False,            "power_smoothing": 0.5,
             "speed_smoothing": 0.5,
             "apply_constraints": True,
             "rem_cannot_follow_wake": True,
@@ -114,24 +112,19 @@ class SleepScoring(SpyglassMixin, dj.Computed):
     ---
     state_labels: longblob               # Array of state labels (0=NREM, 1=REM, 2=WAKE)
     timestamps: longblob                 # Timestamps for state labels
-    nrem_duration: float             # Total NREM duration (seconds)
-    rem_duration: float              # Total REM duration (seconds)
-    wake_duration: float             # Total WAKE duration (seconds)
-    nrem_percentage: float           # Percentage of time in NREM
-    rem_percentage: float            # Percentage of time in REM
-    wake_percentage: float           # Percentage of time in WAKE
+    nrem_duration: float                 # Total NREM duration (seconds)
+    rem_duration: float                  # Total REM duration (seconds)
+    wake_duration: float                 # Total WAKE duration (seconds)
+    nrem_percentage: float               # Percentage of time in NREM
+    rem_percentage: float                # Percentage of time in REM
+    wake_percentage: float               # Percentage of time in WAKE
     -> AnalysisNwbfile
     trial_object_id: varchar(40)
     """
 
     def make(self, key):
-        # --- Part 1: fetch ---
         fetch_dict = self._fetch_data(key)
-
-        # --- Part 2: compute ---
         result = self._compute_states(key, fetch_dict)
-
-        # --- Part 3: store ---
         self._store_results(key, result, fetch_dict["nwb_file_name"])
 
     # ==================== Tri-part helpers ====================
@@ -165,39 +158,42 @@ class SleepScoring(SpyglassMixin, dj.Computed):
 
         # Head speed
         head_speed = None
-        if sel.get("pos_merge_id"):
-            pos_df = (
-                PositionOutput & {"merge_id": sel["pos_merge_id"]}
-            ).fetch1_dataframe()
+        if sel.get("pos_merge_id") is not None:
+            pos_df = (PositionOutput & {"merge_id": sel["pos_merge_id"]}).fetch1_dataframe()
             head_speed = np.interp(
                 theta_timestamps, pos_df.index.values, pos_df["speed"].values
             )
 
         # EMG (optional)
         emg_power = None
-        if sel.get("emg_filter_name"):
+        if sel.get("emg_merge_id") is not None and sel.get("emg_filter_name"):
             emg_df = (
-                lfp.LFPOutput()
-                & {
-                    "merge_id": sel["emg_merge_id"],
-                    # "filter_name": sel["emg_filter_name"],
-                }
+                lfp.LFPOutput
+                & {"merge_id": sel["emg_merge_id"]}
             ).fetch1_dataframe()
-            print(emg_df)
-            emg_power = emg_df.mean(axis=1).values
+            print(f"Fetched EMG dataframe with shape {emg_df.shape}")
+            emg_timestamps, emg_corr = self.emg_from_lfp_corr(emg_df, output_fs=2.0)
+            emg_power = np.interp(theta_timestamps, emg_timestamps, emg_corr)
 
+        # PSS (optional)
         pss_data = None
         if params["use_pss"]:
-             pss_timestamps = (SleepPSS & {'nwb_file_name': sel['nwb_file_name'],
-                                              'lfp_merge_id': sel['lfp_merge_id']}).fetch("pss_timestamps")[0]
-             pss_values = (SleepPSS & {'nwb_file_name': sel['nwb_file_name'],
-                                              'lfp_merge_id': sel['lfp_merge_id']}).fetch("pss_values")[0]
-             print(pss_timestamps.shape, pss_values.shape, theta_timestamps.shape)
-             pss_data = np.interp(
-                theta_timestamps,
-                pss_timestamps,
-                pss_values,
-            )
+            pss_timestamps = (
+                SleepPSS
+                & {
+                    "nwb_file_name": sel["nwb_file_name"],
+                    "lfp_merge_id": sel["lfp_merge_id"],
+                }
+            ).fetch("pss_timestamps")[0]
+            pss_values = (
+                SleepPSS
+                & {
+                    "nwb_file_name": sel["nwb_file_name"],
+                    "lfp_merge_id": sel["lfp_merge_id"],
+                }
+            ).fetch("pss_values")[0]
+            print(pss_timestamps.shape, pss_values.shape, theta_timestamps.shape)
+            pss_data = np.interp(theta_timestamps, pss_timestamps, pss_values)
 
         return {
             "params": params,
@@ -276,13 +272,6 @@ class SleepScoring(SpyglassMixin, dj.Computed):
     def _store_results(self, key, result, nwb_file_name):
         """Write results to the NWB file and insert the DB row.
 
-        add_nwb_object requires an object with a .name attribute.
-        Spyglass natively wraps np.ndarray in ScratchData, so we store
-        state_labels and timestamps as separate named arrays.
-        """
-    def _store_results(self, key, result, nwb_file_name):
-        """Write results to the NWB file and insert the DB row.
-
         Uses the context manager pattern so AnalysisNwbfile registration
         (and the FK ref) is handled automatically. Pass arrays directly
         rather than a dict since add_nwb_object requires an np.ndarray.
@@ -291,9 +280,7 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             obj_id = builder.add_nwb_object(
                 result["states"].astype(np.int32), table_name="state_labels"
             )
-            builder.add_nwb_object(
-                result["timestamps"], table_name="timestamps"
-            )
+            builder.add_nwb_object(result["timestamps"], table_name="timestamps")
             analysis_file_name = builder.analysis_file_name
 
         self.insert1(
@@ -311,66 +298,83 @@ class SleepScoring(SpyglassMixin, dj.Computed):
                 "trial_object_id": obj_id,
             }
         )
+
     # ==================== Feature Preparation ====================
 
-    def emg_from_lfp_corr(emg_df, output_fs=2):
+    @staticmethod
+    def emg_from_lfp_corr(
+        lfp_df: pd.DataFrame,
+        output_fs: float = 2.0,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
-        emg_df: DataFrame of shape (n_samples, n_channels)
-                index should be timestamps in seconds
-        output_fs: desired output rate for pseudo-EMG (default 2 Hz)
+        Compute pseudo-EMG from pre-filtered LFP as summed pairwise zero-lag
+        correlations, following Swanson et al. 2025 / Watson et al. 2016 /
+        Schomburg et al. 2014.
+
+        Assumes input has ALREADY been:
+        - Bandpass filtered at 300–600 Hz
+        - Restricted to non-neighboring channels (>200 µm separation)
+
+        Args:
+            lfp_df:    DataFrame of shape (n_samples, n_channels),
+                    index = timestamps in seconds.
+                    Expected input fs ~2000 Hz from Spyglass.
+            output_fs: Desired output rate in Hz (default 2 Hz).
+
+        Returns:
+            out_timestamps: 1-D array at output_fs.
+            emg_corr:       1-D array of summed pairwise correlations.
         """
-        if not isinstance(emg_df, pd.DataFrame):
-            emg_df = pd.DataFrame(emg_df)
+        if not isinstance(lfp_df, pd.DataFrame):
+            lfp_df = pd.DataFrame(lfp_df)
 
-        x = emg_df.to_numpy()
-        timestamps = emg_df.index.to_numpy()
+        timestamps = lfp_df.index.to_numpy(dtype=float)
+        x = lfp_df.to_numpy(dtype=float)  # (n_samples, n_channels)
+        n_samples, n_channels = x.shape
 
-        if len(timestamps) < 2:
-            raise ValueError("Need at least 2 timestamps")
+        if n_samples < 2:
+            raise ValueError("Need at least 2 samples.")
+        if n_channels < 2:
+            raise ValueError("Need at least 2 channels to compute pairwise EMG.")
 
-        fs = 1.0 / np.median(np.diff(timestamps))  # sampling rate of filtered signal
+        fs = 1.0 / float(np.median(np.diff(timestamps)))
 
-        # MATLAB equivalent:
-        # binScootS = 1 ./ samplingFrequency;
-        # binScootSamps = round(Fs*binScootS);
-        # xcorr_window_samps = round(binScootS*Fs);
+        # Window sizing matches original MATLAB logic:
+        #   binScootSamps      = round(Fs / output_fs)   -> step between frames
+        #   xcorr_window_samps = round(Fs / output_fs)   -> half-width of window
         step_samps = int(round(fs / output_fs))
-        half_window_samps = int(round(fs / output_fs))  # centered window half-width
+        half_win = step_samps
 
-        window_inds = np.arange(-half_window_samps, half_window_samps + 1)
-        center_inds = np.arange(half_window_samps, len(x) - half_window_samps, step_samps)
+        center_inds = np.arange(half_win, n_samples - half_win, step_samps)
+        if len(center_inds) == 0:
+            raise ValueError(
+                f"Signal too short for output_fs={output_fs} Hz "
+                f"(need at least {2 * half_win + 1} samples, got {n_samples})."
+            )
 
-        n_pairs = x.shape[1] * (x.shape[1] - 1) // 2
+        win_offsets = np.arange(-half_win, half_win + 1)  # (2*half_win+1,)
+
+        # All pairs — channel selection already done upstream
+        pairs = [(j, k) for j in range(n_channels) for k in range(j + 1, n_channels)]
+
+        # Summed zero-lag Pearson correlation across all pairs
         emg_corr = np.zeros(len(center_inds), dtype=float)
 
-        pair_count = 0
-        n_channels = x.shape[1]
+        for j, k in pairs:
+            pair_trace = np.empty(len(center_inds), dtype=float)
+            for idx, ci in enumerate(center_inds):
+                seg_j = x[ci + win_offsets, j]
+                seg_k = x[ci + win_offsets, k]
+                std_j = np.std(seg_j)
+                std_k = np.std(seg_k)
+                if std_j == 0.0 or std_k == 0.0:
+                    pair_trace[idx] = np.nan
+                else:
+                    pair_trace[idx] = np.corrcoef(seg_j, seg_k)[0, 1]
 
-        for j in range(n_channels):
-            for k in range(j + 1, n_channels):
-                pair_count += 1
-                pair_trace = []
+            emg_corr += np.nan_to_num(pair_trace, nan=0.0)
 
-                for i in center_inds:
-                    seg1 = x[i + window_inds, j]
-                    seg2 = x[i + window_inds, k]
-
-                    # Pearson correlation for this window
-                    if np.std(seg1) == 0 or np.std(seg2) == 0:
-                        r = np.nan
-                    else:
-                        r = np.corrcoef(seg1, seg2)[0, 1]
-
-                    pair_trace.append(r)
-
-                pair_trace = np.asarray(pair_trace, dtype=float)
-                pair_trace = np.nan_to_num(pair_trace, nan=0.0)
-
-                emg_corr += pair_trace
-
-        emg_corr /= n_pairs
         out_timestamps = timestamps[center_inds]
-
         return out_timestamps, emg_corr
 
     def _prepare_features(
@@ -425,8 +429,10 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         feature_list = [
             np.log(features["delta_power"] + 1e-10),
             np.log(features["theta_power"] + 1e-10),
-            np.log(features["emg_power"] + 1e-10),
         ]
+
+        if features.get("emg_power") is not None:
+            feature_list.append(np.log(features["emg_power"] + 1e-10))
 
         if params["use_pss"] and np.any(features["pss"] != 0):
             feature_list.append(features["pss"])
@@ -452,19 +458,17 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         n = len(features["time"])
         states = np.full(n, 2)  # default all WAKE
 
-        use_emg = params.get("use_emg_for_wake", False)
         use_speed = params.get("use_speed_for_wake", True)
 
         emg_available = (
             features.get("emg_power") is not None
             and not np.allclose(features["emg_power"], 0)
-            and use_emg
         )
 
         if emg_available:
-            emg_z = (
-                np.log(features["emg_power"] + 1e-10) - np.mean(np.log(features["emg_power"] + 1e-10))
-            ) / np.std(np.log(features["emg_power"] + 1e-10))
+            print("Wake detection using EMG")
+            emg_log = np.log(features["emg_power"] + 1e-10)
+            emg_z = (emg_log - np.mean(emg_log)) / np.std(emg_log)
 
             kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
             emg_labels = kmeans.fit_predict(emg_z.reshape(-1, 1))
@@ -473,7 +477,6 @@ class SleepScoring(SpyglassMixin, dj.Computed):
                 emg_labels = 1 - emg_labels
 
             wake_mask = emg_labels.astype(bool)
-            print(f"Wake detection using EMG: {np.sum(wake_mask)} epochs WAKE")
 
         elif use_speed and features.get("speed_wake") is not None:
             wake_mask = features["speed_wake"].astype(bool)
@@ -538,7 +541,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             c: {
                 "delta": np.mean(features["delta_power"][cluster_labels == c]),
                 "theta": np.mean(features["theta_power"][cluster_labels == c]),
-                "emg": np.mean(features["emg_power"][cluster_labels == c]),
+                "emg": np.mean(features["emg_power"][cluster_labels == c])
+                if features.get("emg_power") is not None
+                else 0.0,
                 "dt_ratio": np.mean(features["delta_theta_ratio"][cluster_labels == c]),
             }
             for c in range(n_clusters)
