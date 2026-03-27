@@ -23,6 +23,7 @@ from spyglass.common.custom_nwbfile import AnalysisNwbfile
 from spyglass.lfp.analysis.v1 import lfp_band
 from spyglass.position.position_merge import PositionOutput
 from spyglass.utils import SpyglassMixin
+from sleep.pss_dmr import PSSParams, PSSSelection, SleepPSS
 
 schema = dj.schema("denissemorales_sleepscoring")
 VALID_METHODS = {"gmm", "kmeans", "hierarchical"}
@@ -176,25 +177,27 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         emg_power = None
         if sel.get("emg_filter_name"):
             emg_df = (
-                lfp_band.LFPBandV1
+                lfp.LFPOutput()
                 & {
-                    "lfp_merge_id": sel["emg_merge_id"],
-                    "filter_name": sel["emg_filter_name"],
+                    "merge_id": sel["emg_merge_id"],
+                    # "filter_name": sel["emg_filter_name"],
                 }
             ).fetch1_dataframe()
+            print(emg_df)
             emg_power = emg_df.mean(axis=1).values
 
-        # PSS (optional)
         pss_data = None
-        if sel.get("pss_filter_name"):
-            pss_df = (
-                lfp.LFPOutput.LFPV1()
-                & {
-                    "lfp_merge_id": sel["pss_merge_id"],
-                    "filter_name": sel["pss_filter_name"],
-                }
-            ).fetch1_dataframe()
-            pss_data = pss_df.mean(axis=1).values
+        if params["use_pss"]:
+             pss_timestamps = (SleepPSS & {'nwb_file_name': sel['nwb_file_name'],
+                                              'lfp_merge_id': sel['lfp_merge_id']}).fetch("pss_timestamps")[0]
+             pss_values = (SleepPSS & {'nwb_file_name': sel['nwb_file_name'],
+                                              'lfp_merge_id': sel['lfp_merge_id']}).fetch("pss_values")[0]
+             print(pss_timestamps.shape, pss_values.shape, theta_timestamps.shape)
+             pss_data = np.interp(
+                theta_timestamps,
+                pss_timestamps,
+                pss_values,
+            )
 
         return {
             "params": params,
@@ -309,6 +312,66 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             }
         )
     # ==================== Feature Preparation ====================
+
+    def emg_from_lfp_corr(emg_df, output_fs=2):
+        """
+        emg_df: DataFrame of shape (n_samples, n_channels)
+                index should be timestamps in seconds
+        output_fs: desired output rate for pseudo-EMG (default 2 Hz)
+        """
+        if not isinstance(emg_df, pd.DataFrame):
+            emg_df = pd.DataFrame(emg_df)
+
+        x = emg_df.to_numpy()
+        timestamps = emg_df.index.to_numpy()
+
+        if len(timestamps) < 2:
+            raise ValueError("Need at least 2 timestamps")
+
+        fs = 1.0 / np.median(np.diff(timestamps))  # sampling rate of filtered signal
+
+        # MATLAB equivalent:
+        # binScootS = 1 ./ samplingFrequency;
+        # binScootSamps = round(Fs*binScootS);
+        # xcorr_window_samps = round(binScootS*Fs);
+        step_samps = int(round(fs / output_fs))
+        half_window_samps = int(round(fs / output_fs))  # centered window half-width
+
+        window_inds = np.arange(-half_window_samps, half_window_samps + 1)
+        center_inds = np.arange(half_window_samps, len(x) - half_window_samps, step_samps)
+
+        n_pairs = x.shape[1] * (x.shape[1] - 1) // 2
+        emg_corr = np.zeros(len(center_inds), dtype=float)
+
+        pair_count = 0
+        n_channels = x.shape[1]
+
+        for j in range(n_channels):
+            for k in range(j + 1, n_channels):
+                pair_count += 1
+                pair_trace = []
+
+                for i in center_inds:
+                    seg1 = x[i + window_inds, j]
+                    seg2 = x[i + window_inds, k]
+
+                    # Pearson correlation for this window
+                    if np.std(seg1) == 0 or np.std(seg2) == 0:
+                        r = np.nan
+                    else:
+                        r = np.corrcoef(seg1, seg2)[0, 1]
+
+                    pair_trace.append(r)
+
+                pair_trace = np.asarray(pair_trace, dtype=float)
+                pair_trace = np.nan_to_num(pair_trace, nan=0.0)
+
+                emg_corr += pair_trace
+
+        emg_corr /= n_pairs
+        out_timestamps = timestamps[center_inds]
+
+        return out_timestamps, emg_corr
 
     def _prepare_features(
         self,
