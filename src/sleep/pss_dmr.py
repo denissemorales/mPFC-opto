@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import warnings
 from typing import Optional, Tuple
-import spyglass.lfp as lfp
 
 import datajoint as dj
 import numpy as np
@@ -78,33 +77,8 @@ def compute_pss_windows(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute sliding-window PSS from a wideband LFP trace.
 
-    Parameters
-    ----------
-    x : array-like
-        Wideband LFP signal.
-    fs : float
-        Sampling rate in Hz.
-    window_s : float
-        Window length in seconds.
-    step_s : float
-        Step between windows in seconds.
-    f_range : tuple
-        Frequency range for slope fit.
-
-    Returns
-    -------
-    t_centers : np.ndarray
-        Window center timestamps in seconds.
-    pss_vals : np.ndarray
-        Inverted slope values.
-    slopes : np.ndarray
-        Raw slopes.
-    intercepts : np.ndarray
-        Raw intercepts.
-    freqs : np.ndarray
-        Welch frequency bins.
-    psd_matrix : np.ndarray
-        PSD per window.
+    Returns relative window centers in seconds from the start of x.
+    For absolute timestamps, prefer compute_pss_windows_with_timestamps().
     """
     x = np.asarray(x, dtype=float)
     nperseg = int(round(window_s * fs))
@@ -142,6 +116,73 @@ def compute_pss_windows(
         slopes[i] = slope
         intercepts[i] = intercept
         t_centers[i] = (start + nperseg / 2) / fs
+        psd_rows.append(psd)
+
+    return (
+        t_centers,
+        pss_vals,
+        slopes,
+        intercepts,
+        freqs_out,
+        np.asarray(psd_rows),
+    )
+
+
+def compute_pss_windows_with_timestamps(
+    x: np.ndarray,
+    timestamps: np.ndarray,
+    fs: float,
+    window_s: float = 2.0,
+    step_s: float = 1.0,
+    f_range: Tuple[float, float] = (4.0, 90.0),
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute sliding-window PSS and return absolute window-center timestamps.
+
+    This is the preferred helper when the LFP dataframe index is already in
+    absolute time (e.g., Unix seconds), because the returned timestamps will
+    match the sleep scoring timebase.
+    """
+    x = np.asarray(x, dtype=float)
+    timestamps = np.asarray(timestamps, dtype=float)
+    if len(x) != len(timestamps):
+        raise ValueError("x and timestamps must have the same length.")
+
+    nperseg = int(round(window_s * fs))
+    step = int(round(step_s * fs))
+
+    if nperseg < 16:
+        raise ValueError("window_s is too small for stable PSS estimation.")
+    if step <= 0:
+        raise ValueError("step_s must be positive.")
+    if len(x) < nperseg:
+        raise ValueError("Signal shorter than one window.")
+
+    starts = np.arange(0, len(x) - nperseg + 1, step)
+    t_centers = np.empty(len(starts), dtype=float)
+    pss_vals = np.empty(len(starts), dtype=float)
+    slopes = np.empty(len(starts), dtype=float)
+    intercepts = np.empty(len(starts), dtype=float)
+    psd_rows = []
+    freqs_out = None
+
+    for i, start in enumerate(starts):
+        seg = x[start : start + nperseg]
+        freqs, psd = welch(
+            seg,
+            fs=fs,
+            nperseg=nperseg,
+            noverlap=0,
+            detrend="constant",
+            scaling="density",
+        )
+        if freqs_out is None:
+            freqs_out = freqs
+        pss, intercept, slope = fit_pss_from_psd(freqs, psd, f_range=f_range)
+        pss_vals[i] = pss
+        slopes[i] = slope
+        intercepts[i] = intercept
+        # Center timestamp from the original absolute timestamps
+        t_centers[i] = float(timestamps[start + nperseg // 2])
         psd_rows.append(psd)
 
     return (
@@ -233,12 +274,19 @@ class SleepPSS(SpyglassMixin, dj.Computed):
             )
 
         fs = float(sel["filter_sampling_rate"])
-        t_pss, pss_vals, slopes, intercepts, freqs, psd = compute_pss_windows(
-            x,
-            fs=fs,
-            window_s=float(params["window_s"]),
-            step_s=float(params["step_s"]),
-            f_range=(float(params["fmin"]), float(params["fmax"])),
+        lfp_timestamps = np.asarray(lfp_df.index.values, dtype=float)
+        if len(lfp_timestamps) != len(x):
+            raise ValueError("LFP timestamps and signal length do not match.")
+
+        t_pss, pss_vals, slopes, intercepts, freqs, psd = (
+            compute_pss_windows_with_timestamps(
+                x,
+                timestamps=lfp_timestamps,
+                fs=fs,
+                window_s=float(params["window_s"]),
+                step_s=float(params["step_s"]),
+                f_range=(float(params["fmin"]), float(params["fmax"])),
+            )
         )
 
         self.insert1(
@@ -260,9 +308,10 @@ class SleepPSS(SpyglassMixin, dj.Computed):
         """
         try:
             return (
-                lfp.LFPOutput()
+                lfp_band.LFPBandV1
                 & {
-                    "merge_id": sel["lfp_merge_id"]
+                    "lfp_merge_id": sel["lfp_merge_id"],
+                    "filter_name": sel["pss_source_filter_name"],
                 }
             ).fetch1_dataframe()
         except Exception as exc:

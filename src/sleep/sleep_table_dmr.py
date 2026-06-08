@@ -466,17 +466,30 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         )
 
         if emg_available:
-            print("Wake detection using EMG")
-            emg_log = np.log(features["emg_power"] + 1e-10)
-            emg_z = (emg_log - np.mean(emg_log)) / np.std(emg_log)
+            emg = np.asarray(features["emg_power"], dtype=float)
 
-            kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
-            emg_labels = kmeans.fit_predict(emg_z.reshape(-1, 1))
+            # Robust z-score on the correlation-based EMG metric.
+            med = np.nanmedian(emg)
+            mad = np.nanmedian(np.abs(emg - med)) + 1e-9
+            emg_z = (emg - med) / (1.4826 * mad)
 
-            if np.mean(emg_z[emg_labels == 0]) > np.mean(emg_z[emg_labels == 1]):
-                emg_labels = 1 - emg_labels
+            # Wake = upper tail only.
+            thr = np.nanpercentile(emg_z, 80)
+            wake_mask = emg_z > thr
 
-            wake_mask = emg_labels.astype(bool)
+            wake_fraction = float(np.mean(wake_mask))
+            print(
+                f"Wake detection using EMG: threshold={thr:.3f}, "
+                f"wake_fraction={wake_fraction:.3f}"
+            )
+
+            # Fail-safe: if EMG is too permissive or too sparse, fall back to speed.
+            if wake_fraction > 0.6 or wake_fraction < 0.01:
+                print("EMG separation looks bad; falling back to head speed")
+                if use_speed and features.get("speed_wake") is not None:
+                    wake_mask = features["speed_wake"].astype(bool)
+                else:
+                    wake_mask = np.zeros(n, dtype=bool)
 
         elif use_speed and features.get("speed_wake") is not None:
             wake_mask = features["speed_wake"].astype(bool)
@@ -654,39 +667,47 @@ class SleepScoring(SpyglassMixin, dj.Computed):
 
     # ==================== Visualisation ====================
 
-    def plot_hypnogram(self, figsize=(15, 8)):
-        """Plot sleep state hypnogram with summary statistics."""
-        states = self.fetch1("state_labels")
-        timestamps = self.fetch1("timestamps")
-        time_hours = (timestamps - timestamps[0]) / 3600
+    def plot_hypnogram(self, figsize=(15, 4)):
+            """Plot sleep state hypnogram using step plot for clearer state transitions."""
+            states = self.fetch1("state_labels")
+            timestamps = self.fetch1("timestamps")
+            time_hours = (timestamps - timestamps[0]) / 3600
 
-        state_colors = {0: "blue", 1: "red", 2: "green"}
-        colors = [state_colors[s] for s in states]
+            # Map states to numeric levels
+            state_map = {0: 0, 1: 1, 2: 2}
+            y = np.array([state_map[s] for s in states])
 
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.scatter(time_hours, states, c=colors, s=1, alpha=0.7)
-        ax.set_xlabel("Time (hours)")
-        ax.set_ylabel("Sleep State")
-        ax.set_yticks([0, 1, 2])
-        ax.set_yticklabels(["NREM", "REM", "WAKE"])
-        ax.set_title("Sleep State Hypnogram")
-        ax.grid(True, alpha=0.3)
+            fig, ax = plt.subplots(figsize=figsize)
 
-        nrem_pct, rem_pct, wake_pct = self.fetch1(
-            "nrem_percentage", "rem_percentage", "wake_percentage"
-        )
-        stats_text = (
-            f"NREM: {nrem_pct:.1f}%\nREM: {rem_pct:.1f}%\nWAKE: {wake_pct:.1f}%"
-        )
-        ax.text(
-            0.02,
-            0.98,
-            stats_text,
-            transform=ax.transAxes,
-            verticalalignment="top",
-            bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
-        )
+            # Step plot (clean hypnogram style)
+            ax.step(time_hours, y, where="post", linewidth=1.5)
 
-        plt.tight_layout()
-        plt.show()
-        return fig
+            # Styling
+            ax.set_yticks([0, 1, 2])
+            ax.set_yticklabels(["NREM", "REM", "WAKE"])
+            ax.set_xlabel("Time (hours)")
+            ax.set_ylabel("Sleep State")
+            ax.set_title("Sleep State Hypnogram")
+            ax.grid(True, alpha=0.3)
+
+            # Stats box
+            nrem_pct, rem_pct, wake_pct = self.fetch1(
+                "nrem_percentage", "rem_percentage", "wake_percentage"
+            )
+            stats_text = (
+                f"NREM: {nrem_pct:.1f}%\n"
+                f"REM: {rem_pct:.1f}%\n"
+                f"WAKE: {wake_pct:.1f}%"
+            )
+            ax.text(
+                0.01,
+                0.98,
+                stats_text,
+                transform=ax.transAxes,
+                verticalalignment="top",
+                bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
+            )
+
+            plt.tight_layout()
+            plt.show()
+            return fig
