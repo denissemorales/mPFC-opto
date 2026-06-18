@@ -31,3 +31,4 @@ dj_*
 # csvs
 *.csv
 
+notebooks/sleepscoring_notebook.ipynb
