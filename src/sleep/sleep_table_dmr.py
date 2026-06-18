@@ -28,6 +28,82 @@ from sleep.pss_dmr import PSSParams, PSSSelection, SleepPSS
 schema = dj.schema("denissemorales_sleepscoring")
 VALID_METHODS = {"gmm", "kmeans", "hierarchical"}
 
+@schema
+class SleepScoringParams(SpyglassMixin, dj.Lookup):
+    definition = """
+    sleep_scoring_params_name: varchar(64)
+    ---
+    # Classification parameters
+    method: varchar(32)              # Classification method (gmm | kmeans | hierarchical)
+    use_hierarchical: bool           # Use two-stage classification
+    use_pss: bool                    # Include power spectrum slope if available
+
+    # Smoothing parameters
+    power_smoothing: float           # Gaussian smoothing sigma for power (seconds)
+    speed_smoothing: float           # Gaussian smoothing sigma for speed (seconds)
+
+    # Constraint parameters
+    apply_constraints: bool          # Apply physiological constraints
+    rem_cannot_follow_wake: bool     # REM cannot directly follow WAKE
+    constraint_max_iterations: int    # Max iterations for constraint enforcement
+
+    # State duration parameters
+    min_duration: float              # Minimum state bout duration (seconds)
+
+    # Wake detection parameters
+    speed_threshold: float           # Speed threshold for wake detection (cm/s)
+    use_speed_for_wake: bool         # Use speed instead of EMG for wake detection
+    """
+
+    contents = [
+        {
+            "sleep_scoring_params_name": "hierarchical",
+            "method": "hierarchical",
+            "use_hierarchical": True,
+            "use_pss": False,
+            "power_smoothing": 0.5,
+            "speed_smoothing": 0.5,
+            "apply_constraints": True,
+            "rem_cannot_follow_wake": True,
+            "constraint_max_iterations": 15,
+            "min_duration": 5.0,
+            "speed_threshold": 3.0,
+            "use_speed_for_wake": True,
+        }
+    ]
+
+    def insert1(self, row, **kwargs):
+        method = row.get("method")
+        if method not in VALID_METHODS:
+            raise ValueError(
+                f"Invalid method '{method}'. Must be one of: {VALID_METHODS}"
+            )
+        super().insert1(row, **kwargs)
+
+
+@schema
+class SleepScoringSelection(SpyglassMixin, dj.Manual):
+    definition = """
+    -> SleepScoringParams
+    target_interval_list_name: varchar(64)
+    nwb_file_name: varchar(64)
+    theta_filter_name='': varchar(64)
+    delta_filter_name='': varchar(64)
+    lfp_merge_id: uuid               # Shared LFP merge ID (theta and delta use different filter_names on the same merge)
+    ---
+    emg_merge_id=null: uuid          # Optional EMG band power merge ID
+    pss_merge_id=null: uuid          # Optional PSS merge ID
+
+    # Position merge
+    pos_merge_id: uuid               # PositionOutput merge ID
+
+    # Sampling rate for power features
+    filter_sampling_rate: float
+
+    emg_filter_name='': varchar(64)
+    pss_filter_name='': varchar(64)
+    """
+
 
 @schema
 class SleepScoringParams(SpyglassMixin, dj.Lookup):
@@ -61,7 +137,8 @@ class SleepScoringParams(SpyglassMixin, dj.Lookup):
             "sleep_scoring_params_name": "hierarchical",
             "method": "hierarchical",
             "use_hierarchical": True,
-            "use_pss": False,            "power_smoothing": 0.5,
+            "use_pss": False,
+            "power_smoothing": 0.5,
             "speed_smoothing": 0.5,
             "apply_constraints": True,
             "rem_cannot_follow_wake": True,
@@ -232,19 +309,46 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             window_size=np.median(np.diff(theta_timestamps)),
         )
 
-        # REM fallback
-        rem_mask = states == 1
-        if np.mean(rem_mask) < 0.02 and np.any(states != 2):
+        # REM fallback — find high-theta / low-delta epochs within sleep, but cap assignment
+        if np.mean(states == 1) < 0.02 and np.any(states != 2):
             sleep_mask = states != 2
             theta = features["theta_power"]
             delta = features["delta_power"]
-            rem_mask = (
+
+            # Score each sleep epoch by how "REM-like" it is (high theta, low delta)
+            rem_score = (
+                theta / (np.percentile(theta[sleep_mask], 1) + 1e-10)
+                - delta / (np.percentile(delta[sleep_mask], 99) + 1e-10)
+            )
+
+            # Only consider sleep epochs
+            candidate_scores = np.where(sleep_mask, rem_score, -np.inf)
+
+            # Cap: assign at most 25% of sleep epochs to REM
+            n_sleep = int(np.sum(sleep_mask))
+            max_rem_epochs = max(1, int(n_sleep * 0.25))
+
+            # Take only the top-scoring candidates
+            top_indices = np.argsort(candidate_scores)[-max_rem_epochs:]
+            rem_mask = np.zeros(len(states), dtype=bool)
+            rem_mask[top_indices] = True
+
+            # Extra safety: only assign if they're actually above the theta/delta thresholds
+            threshold_mask = (
                 sleep_mask
-                & (theta > np.percentile(theta[sleep_mask], params.get("rem_percentile", 70)))
+                & (theta > np.percentile(theta[sleep_mask], 70))
                 & (delta < np.percentile(delta[sleep_mask], 30))
             )
-            states[rem_mask] = 1
-            print(f"REM fallback applied: {np.sum(rem_mask)} epochs set to REM")
+            rem_mask = rem_mask & threshold_mask
+
+            if np.any(rem_mask):
+                states[rem_mask] = 1
+                print(
+                    f"REM fallback applied: {np.sum(rem_mask)} epochs set to REM "
+                    f"({100 * np.sum(rem_mask) / n_sleep:.1f}% of sleep)"
+                )
+            else:
+                print("REM fallback: no qualifying epochs found, leaving NREM intact")
 
         # Derive intervals & durations
         nrem_intervals = self._states_to_intervals(states, theta_timestamps, state=0)
@@ -533,17 +637,45 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         else:
             print("Not enough sleep epochs to classify NREM/REM")
 
-        # REM fallback
+        # REM fallback — find high-theta / low-delta epochs within sleep, but cap assignment
         if np.mean(states == 1) < 0.02 and np.any(sleep_mask):
             theta = features["theta_power"]
             delta = features["delta_power"]
-            rem_mask = (
+
+            # Score each sleep epoch by how "REM-like" it is (high theta, low delta)
+            rem_score = (
+                theta / (np.percentile(theta[sleep_mask], 1) + 1e-10)
+                - delta / (np.percentile(delta[sleep_mask], 99) + 1e-10)
+            )
+
+            # Only consider sleep epochs
+            candidate_scores = np.where(sleep_mask, rem_score, -np.inf)
+
+            # Cap: assign at most 25% of sleep epochs to REM
+            n_sleep = int(np.sum(sleep_mask))
+            max_rem_epochs = max(1, int(n_sleep * 0.25))
+
+            # Take only the top-scoring candidates
+            top_indices = np.argsort(candidate_scores)[-max_rem_epochs:]
+            rem_mask = np.zeros(len(states), dtype=bool)
+            rem_mask[top_indices] = True
+
+            # Extra safety: only assign if they're actually above the theta/delta thresholds
+            threshold_mask = (
                 sleep_mask
-                & (theta > np.percentile(theta[sleep_mask], params.get("rem_percentile", 70)))
+                & (theta > np.percentile(theta[sleep_mask], 70))
                 & (delta < np.percentile(delta[sleep_mask], 30))
             )
-            states[rem_mask] = 1
-            print(f"REM fallback applied: {np.sum(rem_mask)} epochs set to REM")
+            rem_mask = rem_mask & threshold_mask
+
+            if np.any(rem_mask):
+                states[rem_mask] = 1
+                print(
+                    f"REM fallback applied: {np.sum(rem_mask)} epochs set to REM "
+                    f"({100 * np.sum(rem_mask) / n_sleep:.1f}% of sleep)"
+                )
+            else:
+                print("REM fallback: no qualifying epochs found, leaving NREM intact")
 
         return states
 
@@ -644,70 +776,67 @@ class SleepScoring(SpyglassMixin, dj.Computed):
 
     # ==================== Fetch / Interval helpers ====================
 
-    def _fetch_interval(self, interval_list_name_field):
-        """Shared helper: fetch valid_times for a named interval list."""
-        interval_name = self.fetch1(interval_list_name_field)
-        key = {
-            "nwb_file_name": self.fetch1("nwb_file_name"),
-            "interval_list_name": interval_name,
-        }
-        return (IntervalList & key).fetch_interval()
+    def _fetch_state_intervals(self, state):
+        """Derive intervals for a given state directly from stored arrays."""
+        states, timestamps = self.fetch1("state_labels", "timestamps")
+        return self._states_to_intervals(states, timestamps, state=state)
 
     def fetch_nrem_times(self):
-        """Fetch NREM intervals."""
-        return self._fetch_interval("nrem_interval_list_name")
+        """Fetch NREM intervals derived from stored state labels."""
+        return self._fetch_state_intervals(state=0)
 
     def fetch_rem_times(self):
-        """Fetch REM intervals."""
-        return self._fetch_interval("rem_interval_list_name")
+        """Fetch REM intervals derived from stored state labels."""
+        return self._fetch_state_intervals(state=1)
 
     def fetch_wake_times(self):
-        """Fetch WAKE intervals."""
-        return self._fetch_interval("wake_interval_list_name")
+        """Fetch WAKE intervals derived from stored state labels."""
+        return self._fetch_state_intervals(state=2)
 
     # ==================== Visualisation ====================
 
     def plot_hypnogram(self, figsize=(15, 4)):
-            """Plot sleep state hypnogram using step plot for clearer state transitions."""
-            states = self.fetch1("state_labels")
-            timestamps = self.fetch1("timestamps")
-            time_hours = (timestamps - timestamps[0]) / 3600
+        """Plot sleep state hypnogram using step plot for clearer state transitions."""
+        states = self.fetch1("state_labels")
+        timestamps = self.fetch1("timestamps")
+        time_hours = (timestamps - timestamps[0]) / 3600
 
-            # Map states to numeric levels
-            state_map = {0: 0, 1: 1, 2: 2}
-            y = np.array([state_map[s] for s in states])
+        # Map states to numeric levels
+        state_map = {0: 0, 1: 1, 2: 2}
+        y = np.array([state_map[s] for s in states])
 
-            fig, ax = plt.subplots(figsize=figsize)
+        fig, ax = plt.subplots(figsize=figsize)
 
-            # Step plot (clean hypnogram style)
-            ax.step(time_hours, y, where="post", linewidth=1.5)
+        # Step plot (clean hypnogram style)
+        ax.step(time_hours, y, where="post", linewidth=1.5)
 
-            # Styling
-            ax.set_yticks([0, 1, 2])
-            ax.set_yticklabels(["NREM", "REM", "WAKE"])
-            ax.set_xlabel("Time (hours)")
-            ax.set_ylabel("Sleep State")
-            ax.set_title("Sleep State Hypnogram")
-            ax.grid(True, alpha=0.3)
+        # Styling
+        ax.set_yticks([0, 1, 2])
+        ax.set_yticklabels(["NREM", "REM", "WAKE"])
+        ax.set_xlabel("Time (hours)")
+        ax.set_ylabel("Sleep State")
+        ax.set_title("Sleep State Hypnogram")
+        ax.grid(True, alpha=0.3)
 
-            # Stats box
-            nrem_pct, rem_pct, wake_pct = self.fetch1(
-                "nrem_percentage", "rem_percentage", "wake_percentage"
-            )
-            stats_text = (
-                f"NREM: {nrem_pct:.1f}%\n"
-                f"REM: {rem_pct:.1f}%\n"
-                f"WAKE: {wake_pct:.1f}%"
-            )
-            ax.text(
-                0.01,
-                0.98,
-                stats_text,
-                transform=ax.transAxes,
-                verticalalignment="top",
-                bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
-            )
+        # Stats box
+        nrem_pct, rem_pct, wake_pct = self.fetch1(
+            "nrem_percentage", "rem_percentage", "wake_percentage"
+        )
+        stats_text = (
+            f"NREM: {nrem_pct:.1f}%\n"
+            f"REM: {rem_pct:.1f}%\n"
+            f"WAKE: {wake_pct:.1f}%"
+        )
+        ax.text(
+            0.01,
+            0.98,
+            stats_text,
+            transform=ax.transAxes,
+            verticalalignment="top",
+            bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
+        )
 
-            plt.tight_layout()
-            plt.show()
-            return fig
+        plt.tight_layout()
+        # plt.show()
+        plt.close(fig)
+        return fig
