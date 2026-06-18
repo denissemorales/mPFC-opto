@@ -275,22 +275,24 @@ class UpDownStates(SpyglassMixin, dj.Computed):
         return states
 
     def _hilbert_detection(self, so_signal, mua_rate, nrem_mask, params):
-        """
-        DOWN = near trough of slow oscillation (|phase| > pi/2) AND low MUA.
-        UP = everything else within NREM.
-        """
         n = len(so_signal)
         states = np.full(n, -1)
 
         phase = np.angle(hilbert(so_signal))
         mua_thresh = np.percentile(mua_rate[nrem_mask], params["mua_down_percentile"])
 
-        near_trough = np.abs(phase) > (np.pi / 2)
+        # Trough = phase near ±π (was incorrectly > π/2, catching most of the cycle)
+        near_trough = np.abs(phase) > (np.pi * 2 / 3)  # last ~third of cycle around trough
+
         low_mua = mua_rate < mua_thresh
 
         states[np.where(nrem_mask)[0]] = np.where(
             near_trough[nrem_mask] & low_mua[nrem_mask], 0, 1
         )
+
+        print(f"near_trough (NREM): {near_trough[nrem_mask].mean():.2%}")
+        print(f"low_mua (NREM): {low_mua[nrem_mask].mean():.2%}")
+        print(f"joint (NREM): {(near_trough[nrem_mask] & low_mua[nrem_mask]).mean():.2%}")
         return states
 
     # ==================== Visualisation ====================
@@ -393,7 +395,6 @@ class UpDownStates(SpyglassMixin, dj.Computed):
         )
 
         plt.tight_layout()
-        plt.show()
         return fig
 
 
