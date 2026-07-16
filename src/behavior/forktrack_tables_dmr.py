@@ -28,7 +28,7 @@ schema = dj.schema("denissemorales_forktrack")
 # PARAMETERS
 # =====================================================
 @schema
-class ForktTrackParams(SpyglassMixin, dj.Manual):
+class ForkTrackParams(SpyglassMixin, dj.Manual):
     definition = """
     forktrack_params_name: varchar(64)
     ---
@@ -55,23 +55,23 @@ class ForktTrackParams(SpyglassMixin, dj.Manual):
                 "HandleMilk_Pump": "Handle_pump",
             },
             dio_channel_map={
-                1: "Left_poke",
-                13: "Center_poke",
-                14: "Right_poke",
-                7: "Handle_poke",
-                2: "Left_pump",
-                12: "Center_pump",
-                11: "Right_pump",
-                8: "Handle_pump",
+                5: "Left_poke",
+                6: "Center_poke",
+                1: "Right_poke",
+                14: "Handle_poke",
+                9: "Left_pump",
+                7: "Center_pump",
+                2: "Right_pump",
+                13: "Handle_pump",
             },
             distance_threshold=15.0,
             validate_against_position=True,
             validate_against_log=True,
             well_positions={
-                "Left_poke": (155, 45),
-                "Center_poke": (125, 60),
-                "Right_poke": (95, 78),
-                "Handle_poke": (0, 0),
+                "Left_poke": (75, 18),
+                "Center_poke": (49, 45),
+                "Right_poke": (15.6, 55),
+                "Handle_poke": (130, 160),
             },
         )
         cls.insert1(default, skip_duplicates=True)
@@ -81,9 +81,9 @@ class ForktTrackParams(SpyglassMixin, dj.Manual):
 # SELECTION TABLE
 # =====================================================
 @schema
-class ForktTrackSelection(SpyglassMixin, dj.Manual):
+class ForkTrackSelection(SpyglassMixin, dj.Manual):
     definition = """
-    -> ForktTrackParams
+    -> ForkTrackParams
     -> Nwbfile
     -> PositionOutput.proj(pos_merge_id='merge_id')
     ---
@@ -96,9 +96,9 @@ class ForktTrackSelection(SpyglassMixin, dj.Manual):
 # COMPUTED TABLE
 # =====================================================
 @schema
-class ForktTrackEvents(SpyglassMixin, dj.Computed):
+class ForkTrackEvents(SpyglassMixin, dj.Computed):
     definition = """
-    -> ForktTrackSelection
+    -> ForkTrackSelection
     ---
     epoch: int
     forktrack_results: blob
@@ -118,11 +118,11 @@ class ForktTrackEvents(SpyglassMixin, dj.Computed):
             [nwb_file_name, nwb_path, epoch, params, statescript_path,
              position_times, position_x, position_y]
         """
-        selection = (ForktTrackSelection & key).fetch1()
+        selection = (ForkTrackSelection & key).fetch1()
         statescript_path = selection.get("statescript_path", None)
         epoch = selection["epoch"] - 1
 
-        params = (ForktTrackParams & key).fetch1()
+        params = (ForkTrackParams & key).fetch1()
         nwb_file_name = (Nwbfile & key).fetch1("nwb_file_name")
         nwb_path = Nwbfile().get_abs_path(nwb_file_name)
 
@@ -167,7 +167,7 @@ class ForktTrackEvents(SpyglassMixin, dj.Computed):
         Parameters
         ----------
         key : dict
-            Primary key to ForktTrackSelection.
+            Primary key to ForkTrackSelection.
         nwb_file_name : str
             Name of the NWB file.
         nwb_path : str
@@ -175,7 +175,7 @@ class ForktTrackEvents(SpyglassMixin, dj.Computed):
         epoch : int
             Zero-indexed epoch number.
         params : dict
-            Output of ForktTrackParams.fetch1().
+            Output of ForkTrackParams.fetch1().
         statescript_path : str or None
             Path to the statescript log file, or None.
         position_times : np.array
@@ -339,62 +339,56 @@ class ForktTrackEvents(SpyglassMixin, dj.Computed):
         # 5. Log validation with ROBUST alignment
         # ----------------------------
         if params["validate_against_log"] and statescript_path:
-            parsed, _ = parse_log_file(
-                statescript_path, timestamp_scale=1000.0
-            )
-            forktrack_dict = create_forktrack_dict(parsed, params["dio_channel_map"])
+            log_df, _ = parse_log_file(statescript_path, timestamp_scale=1000.0)
 
-            log_rows = []
-            for d in forktrack_dict.values():
-                if "poke" not in d["name"].lower():
-                    continue
-                ups = d["times"][d["values"] == 1]
-                for t in ups:
-                    log_rows.append(dict(time=float(t), well_name=d["name"]))
+            if log_df.empty:
+                validation_report["log"] = {
+                    "warning": "No poke events found in statescript log."
+                }
+            else:
+                # robust offset from multiple events
+                N = min(len(raw_poke_df), len(log_df), 20)
 
-            log_df = (
-                pd.DataFrame(log_rows)
-                .sort_values("time")
-                .reset_index(drop=True)
-            )
+                if N == 0:
+                    validation_report["log"] = {
+                        "warning": "Not enough poke events to compute alignment."
+                    }
+                else:
+                    offset = np.median(
+                        raw_poke_df.time.to_numpy()[:N] - log_df.time.to_numpy()[:N]
+                    )
+                    log_df["time"] += offset
 
-            # robust offset from multiple events
-            N = min(len(raw_poke_df), len(log_df), 20)
-            offset = np.median(
-                raw_poke_df.time.to_numpy()[:N] - log_df.time.to_numpy()[:N]
-            )
-            log_df["time"] += offset
+                    # Filter AFTER alignment
+                    log_df = get_first_pokes_after_well_change(log_df)
 
-            # Filter AFTER alignment
-            log_df = get_first_pokes_after_well_change(log_df)
+                    tolerance = 0.02
+                    results = {}
 
-            tolerance = 0.02
-            results = {}
+                    for well, grp in final_df.groupby("well_name"):
+                        proc = grp.time.to_numpy()
+                        gt = log_df[log_df.well_name == well].time.to_numpy()
 
-            for well, grp in final_df.groupby("well_name"):
-                proc = grp.time.to_numpy()
-                gt = log_df[log_df.well_name == well].time.to_numpy()
+                        matched_idx = set()
+                        matched = 0
 
-                matched_idx = set()
-                matched = 0
+                        for g in gt:
+                            if len(proc):
+                                d = np.abs(proc - g)
+                                i = np.argmin(d)
+                                if d[i] < tolerance and i not in matched_idx:
+                                    matched_idx.add(i)
+                                    matched += 1
 
-                for g in gt:
-                    if len(proc):
-                        d = np.abs(proc - g)
-                        i = np.argmin(d)
-                        if d[i] < tolerance and i not in matched_idx:
-                            matched_idx.add(i)
-                            matched += 1
+                        results[well] = dict(
+                            ground_truth_count=len(gt),
+                            processed_count=len(proc),
+                            matched=matched,
+                            match_rate=matched / len(gt) if len(gt) else 0,
+                        )
 
-                results[well] = dict(
-                    ground_truth_count=len(gt),
-                    processed_count=len(proc),
-                    matched=matched,
-                    match_rate=matched / len(gt) if len(gt) else 0,
-                )
-
-            print_forktrack_validation_report(results)
-            validation_report["log"] = results
+                    print_forktrack_validation_report(results)
+                    validation_report["log"] = results
 
         # Compute is_valid: True if all checks passed (no invalid pokes, full log match)
         pos_valid = True
@@ -403,7 +397,7 @@ class ForktTrackEvents(SpyglassMixin, dj.Computed):
         if "position" in validation_report:
             pos_valid = validation_report["position"]["invalid_pokes"] == 0
 
-        if "log" in validation_report:
+        if "log" in validation_report and "warning" not in validation_report["log"]:
             log_valid = all(
                 r["match_rate"] == 1.0
                 for r in validation_report["log"].values()
@@ -414,12 +408,12 @@ class ForktTrackEvents(SpyglassMixin, dj.Computed):
         return [nwb_file_name, final_df, validation_report, epoch, is_valid]
 
     def make_insert(self, key, nwb_file_name, final_df, validation_report, epoch, is_valid):
-        """Write results to NWB and insert into ForktTrackEvents.
+        """Write results to NWB and insert into ForkTrackEvents.
 
         Parameters
         ----------
         key : dict
-            Primary key to ForktTrackSelection.
+            Primary key to ForkTrackSelection.
         nwb_file_name : str
             Name of the NWB file.
         final_df : pd.DataFrame
@@ -869,85 +863,73 @@ def _parse_raw_values(lines, i):
 
 def parse_log_file(filepath, timestamp_scale=1000.0):
     """
-    Parse DIO event log file.
+    Parse the new statescript log format.
 
-    Parameters
-    ----------
-    filepath : str
-        Path to the log file
-    timestamp_scale : float
-        Scale factor to convert timestamps to seconds (default 1000 = milliseconds)
+    Expected event lines:
+        <timestamp> handle_poke
+        <timestamp> left_poke
+        <timestamp> right_poke
+        <timestamp> center_poke
+
+    Other lines (reward counters, DIO values, etc.) are ignored.
 
     Returns
     -------
-    dict
-        Dictionary mapping DIO channel to event data:
-        {
-            dio_channel: {
-                'times': np.array,
-                'values': np.array (0 for DOWN, 1 for UP),
-                'raw_values': list of (value1, value2) tuples
-            }
-        }
+    pd.DataFrame
+        Columns:
+            time : float (seconds)
+            well_name : str
     list
-        List of reward events (if any)
+        Reward/counter lines containing '='
     """
-    dio_events = defaultdict(
-        lambda: {"times": [], "values": [], "raw_values": []}
-    )
-    reward_events = []
 
-    with open(filepath, "r") as f:
-        lines = f.readlines()
-
-    for i, raw_line in enumerate(lines):
-        line = raw_line.strip()
-
-        if not line or line.startswith("~~~"):
-            continue
-
-        if "=" in line:
-            reward_events.append(line)
-            continue
-
-        parts = line.split()
-
-        if len(parts) < 3:
-            continue
-
-        if not parts[0].isdigit():
-            continue
-
-        try:
-            timestamp = int(parts[0])
-        except ValueError:
-            continue
-
-        if parts[1] not in ["UP", "DOWN"]:
-            continue
-
-        try:
-            dio_channel = int(parts[2])
-        except ValueError:
-            continue
-
-        time_sec = timestamp / timestamp_scale
-        value = 1 if parts[1] == "UP" else 0
-
-        dio_events[dio_channel]["times"].append(time_sec)
-        dio_events[dio_channel]["values"].append(value)
-        dio_events[dio_channel]["raw_values"].append(_parse_raw_values(lines, i))
-
-    parsed_events = {
-        dio_channel: {
-            "times": np.array(data["times"]),
-            "values": np.array(data["values"]),
-            "raw_values": data["raw_values"],
-        }
-        for dio_channel, data in dio_events.items()
+    poke_name_map = {
+        "handle_poke": "Handle_poke",
+        "left_poke": "Left_poke",
+        "right_poke": "Right_poke",
+        "center_poke": "Center_poke",
     }
 
-    return parsed_events, reward_events
+    rows = []
+    reward_events = []
+
+    with open(filepath) as f:
+        for line in f:
+            line = line.strip()
+
+            if not line or line.startswith("~~~"):
+                continue
+
+            if "=" in line:
+                reward_events.append(line)
+                continue
+
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+
+            try:
+                timestamp = int(parts[0])
+            except ValueError:
+                continue
+
+            event = parts[1].lower()
+
+            if event in poke_name_map:
+                rows.append(
+                    {
+                        "time": timestamp / timestamp_scale,
+                        "well_name": poke_name_map[event],
+                    }
+                )
+
+    log_df = (
+        pd.DataFrame(rows, columns=["time", "well_name"])
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+
+    return log_df, reward_events
 
 
 def create_forktrack_dict(parsed_events, dio_name_map):
@@ -1022,7 +1004,7 @@ def compute_performance(final_df, window=10, trial_types=None):
     Parameters
     ----------
     final_df : pd.DataFrame
-        Trial-level DataFrame from ForktTrackEvents (forktrack_results).
+        Trial-level DataFrame from ForkTrackEvents (forktrack_results).
         Expected columns: 'time', 'well_name', 'pump_triggered',
         'position_valid', 'trial_type', 'transition', 'epoch'.
     window : int
