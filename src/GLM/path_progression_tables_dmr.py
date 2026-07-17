@@ -21,6 +21,7 @@ from behavior.forktrack_tables_dmr import ForkTrackEvents
 
 schema = dj.schema("denissemorales_pathprogress")
 
+
 @schema
 class PathProgressSelection(SpyglassMixin, dj.Manual):
     definition = """
@@ -47,9 +48,11 @@ class PathProgressSelection(SpyglassMixin, dj.Manual):
         Parameters
         ----------
         key : dict
-            Primary key fields for PathProgressSelection (nwb_file_name,
-            pos_merge_id, forktrack key fields, track_graph_name) plus
-            'epoch'.
+            Primary key fields for PathProgressSelection: 'nwb_file_name',
+            'merge_id' (LinearizedPositionOutput's own id), 'pos_merge_id'
+            (the position id ForkTrackEvents was computed from -- these are
+            two distinct ids, do not conflate them), 'forktrack_params_name',
+            'track_graph_name', and 'epoch'.
         left, right, center, handle : tuple/list/array of (x, y)
             2D coordinates for each well/arm.
         skip_duplicates : bool, optional
@@ -95,7 +98,7 @@ class PathProgress(SpyglassMixin, dj.Computed):
             .reset_index()
         )
 
-        forktrack_results = pd.DataFrame((ForkTrackEvents() &{'nwb_file_name': nwb_file_name, 'epoch': epoch}).fetch('forktrack_results')[0])
+        forktrack_results = pd.DataFrame((ForkTrackEvents() &{'nwb_file_name': nwb_file_name, 'epoch': selection["epoch"]}).fetch('forktrack_results')[0])
 
         track_graph_name = selection["track_graph_name"]
         track_graph = (sgpl.TrackGraph & {"track_graph_name": track_graph_name }).get_networkx_track_graph()
@@ -206,6 +209,7 @@ class PathProgress(SpyglassMixin, dj.Computed):
             "right_to_left":   (right_bin, left_bin),
         }
 
+
         xy_cols = ["projected_x_position", "projected_y_position"]
         finite_mask = np.isfinite(position_info[xy_cols].values).all(axis=1)
         print(f"Dropping {(~finite_mask).sum()} of {len(position_info)} rows")
@@ -231,12 +235,8 @@ class PathProgress(SpyglassMixin, dj.Computed):
         )
         linear_position_df["trajectory_progress"] = progress
 
-        # NOTE: previously this block appended to an undefined `final_rows`
-        # list with a syntax error (`time=` had no value) and only ever
-        # produced a single row with no real data. Replaced with the
-        # per-timepoint frame the plotting code below actually needs.
         final_df = linear_position_df.copy()
-        final_df["epoch"] = epoch + 1
+        final_df["epoch"] = epoch
 
         plt.figure(figsize=(12, 4))
         for traj, g in linear_position_df.dropna(subset=["trajectory_progress"]).groupby("trajectory"):
@@ -264,7 +264,7 @@ class PathProgress(SpyglassMixin, dj.Computed):
         final_df : pd.DataFrame
             Trial-level DataFrame produced by make_compute.
         epoch : int
-            Zero-indexed epoch number (will be stored as epoch + 1).
+            epoch number
         """
 
         with AnalysisNwbfile().build(nwb_file_name) as builder:
@@ -281,7 +281,7 @@ class PathProgress(SpyglassMixin, dj.Computed):
             dict(
                 **key,
                 epoch=epoch,
-                pathprogress_results=final_df.to_dict("records"),
+                pathprogress_results=final_df["trajectory"].value_counts(dropna=False).to_dict(),
                 analysis_file_name=analysis_file,
                 trial_object_id=obj_id,
             )
