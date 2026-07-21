@@ -1,5 +1,5 @@
 """
-Spyglass Fork Track Validation + Behavioral Result Pipeline
+Spyglass Fork Track Tables
 
 This module extracts, processes, and validates DIO (digital input/output)
 signals from NWB files using the Spyglass + DataJoint pipeline framework
@@ -173,7 +173,7 @@ class ForkTrackEvents(SpyglassMixin, dj.Computed):
         nwb_path : str
             Absolute path to the NWB file.
         epoch : int
-            Zero-indexed epoch number.
+            epoch number.
         params : dict
             Output of ForkTrackParams.fetch1().
         statescript_path : str or None
