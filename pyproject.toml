@@ -1,16 +1,112 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=77"] # >=77 understands the SPDX `license` string
+
 [project]
 name = "mPFC-opto"
 version = "0.1.0"
+description = "Preliminary analysis of mPFC-opto experiments in the Frank Lab at UCSF"
 readme = "README.md"
-dependencies = [
-    "numpy",
-    "scipy",
-    "pandas",
-    "matplotlib",
+keywords = [
+    "datajoint",
+    "electrophysiology",
+    "neuroscience",
+    "nwb",
+    "optogenetics",
+    "prefrontal cortex",
+    "spyglass",
 ]
+license = "MIT"
+authors = [
+    { name = "Denisse Morales", email = "Denisse.Morales-Rodriguez@ucsf.edu" },
+]
+requires-python = ">=3.10,<3.13"
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "datajoint>=0.14.5,<2",
+    # spyglass requires numpy<2 because of spikeinterface
+    # The window below is what satisfies nemos (>=0.4.28) and numpy 1 (<0.7.2)
+    "jax>=0.4.28,<0.7.2",
+    "matplotlib", # also provides `pylab`
+    "nemos",
+    "networkx",
+    "neurospatial",
+    "numpy<2",
+    "pandas",
+    "pynwb",
+    "scikit-learn",
+    "scipy",
+    # >=0.6 for custom_nwbfile. kachery-cloud for spikesorting v0
+    "spyglass-neuro[kachery-cloud]>=0.6.0",
+]
+
+optional-dependencies.test = [
+    "docker",   # spins up the MySQL server for database-backed tests
+    "jupytext", # keeps notebooks and their paired scripts in sync
+    "pytest",
+    "pytest-cov",
+    # tomllib is stdlib only from 3.11, and this project supports 3.10.
+    "tomli; python_version < '3.11'",
+]
+urls.Homepage = "https://github.com/denissemorales/mPFC-opto"
+urls.Repository = "https://github.com/denissemorales/mPFC-opto"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.black]
+line-length = 80
+
+[tool.ruff]
+line-length = 80
+src = ["src", "tests"]
+# Generated from the notebooks by jupytext; lint the notebook, not the copy.
+extend-exclude = ["notebooks/py_scripts"]
+# No "I": black owns formatting, and import sorting is not used here.
+lint.extend-select = ["UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*.ipynb" = [
+    "E402", # imports after code: how a notebook is written
+    "F401", # imports kept for later cells, or for their display side effects
+    "F811", # a cell re-importing a module an earlier cell already imported
+]
+# F821 is deliberately *not* ignored here. The notebooks do reference undefined
+# names, but each site carries a `# noqa: F821` and a `# REVIEW:` note, so the
+# cases stay greppable instead of vanishing behind a blanket rule.
+
+[tool.pytest.ini_options]
+addopts = "-q"
+minversion = "7.0"
+testpaths = ["tests"]
+markers = [
+    "unit: pure functions; no database, no file I/O",
+    "requires_db: needs a MySQL server, so only runs under --with-db",
+]
+
+[tool.coverage.run]
+command_line = "-m pytest"
+source_pkgs = ["mpfc_opto", "tests"]
+
+[tool.coverage.report]
+exclude_lines = ["if TYPE_CHECKING:", "pragma: no cover"]
+show_missing = true
+# No fail_under yet: most of this package is DataJoint table definitions that
+# only execute against a database, so a threshold set now would gate on
+# --with-db runs rather than on test quality.
+
+[tool.coverage.paths]
+mpfc_opto = ["src/mpfc_opto"]
+tests = ["tests"]

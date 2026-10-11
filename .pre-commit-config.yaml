@@ -1,0 +1,60 @@
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-toml
+      - id: check-yaml
+      - id: check-added-large-files
+      # Skip both halves of a jupytext pair. Inside a .ipynb these rewrite JSON
+      # string values, i.e. cell contents. On the generated script they change
+      # the trailing newline, which the .ipynb cannot mirror -- enough to make
+      # `jupytext --sync` call the pair inconsistent on every run.
+      - id: end-of-file-fixer
+        exclude: (\.ipynb$|^notebooks/py_scripts/)
+      - id: trailing-whitespace
+        exclude: (\.ipynb$|^notebooks/py_scripts/)
+
+  - repo: https://github.com/executablebooks/mdformat
+    rev: 1.0.0
+    hooks:
+      - id: mdformat
+        args: [--wrap, "80", --number]
+        additional_dependencies:
+          - mdformat-gfm
+          # Without this, the `---` fences in .github/ISSUE_TEMPLATE/ parse as
+          # thematic breaks and GitHub stops recognizing the templates.
+          - mdformat-frontmatter
+
+  - repo: https://github.com/psf/black
+    rev: 26.3.1
+    hooks:
+      - id: black
+        # notebooks/py_scripts/ is generated from the notebooks. Formatting it
+        # independently fights jupytext: black wants a blank line before the
+        # `# -` cell markers, which jupytext then rewrites away. The pair has
+        # one owner, the jupytext hook below, which blacks both sides together.
+        exclude: ^notebooks/py_scripts/
+
+  # Keeps each notebook and its paired script in step. `--pipe black` formats
+  # both through one tool, so neither side drifts from the other.
+  - repo: https://github.com/mwouts/jupytext
+    rev: v1.19.5
+    hooks:
+      - id: jupytext
+        args: [--sync, --pipe, black]
+        # Without this the hook also inspects every .md, since jupytext can
+        # pair markdown too, and warns that each is not a paired notebook.
+        files: ^notebooks/
+        additional_dependencies:
+          - black==26.3.1
+
+  # Lint only. Formatting is black's, so ruff-format is deliberately absent.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.7
+    hooks:
+      # No --fix: ruff deletes imports it reads as unused, and a DataJoint
+      # table referenced from a `definition` string looks exactly like one.
+      # Report, and let a person decide.
+      - id: ruff-check

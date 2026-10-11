@@ -1,0 +1,20 @@
+# Conda environment for mPFC-opto.
+#
+#   conda env create -f environment.yml
+#   conda activate mpfc-opto
+#
+# Runtime dependencies are declared in pyproject.toml; this file exists to pin
+# the pieces conda handles better than pip -- the Python version and the
+# compiled stack underneath numpy/scipy.
+name: mpfc-opto
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10,<3.13
+  # Spyglass pins numpy<2, and jax ships a compiled extension built against a
+  # specific NumPy ABI. Installing a newer jax here breaks `import jax` with
+  # "numpy._core.multiarray failed to import"; keep the two in step.
+  - numpy<2
+  - pip
+  - pip:
+      - -e ".[test]"

@@ -12,12 +12,12 @@ import pandas as pd
 import networkx as nx
 from spyglass.common import Nwbfile
 from spyglass.common.custom_nwbfile import AnalysisNwbfile
-from spyglass.utils import SpyglassMixin
+from spyglass.utils import SpyglassMixin, logger
 from neurospatial.behavior.navigation import path_progress
 from neurospatial import Environment
 import spyglass.linearization.v1 as sgpl
 from spyglass.linearization.merge import LinearizedPositionOutput
-from behavior.forktrack_tables_dmr import ForkTrackEvents
+from mpfc_opto.behavior.forktrack_tables import ForkTrackEvents
 
 schema = dj.schema("denissemorales_pathprogress")
 
@@ -42,7 +42,9 @@ class PathProgressSelection(SpyglassMixin, dj.Manual):
     """
 
     @classmethod
-    def insert_selection(cls, key, left, right, center, handle, skip_duplicates=False):
+    def insert_selection(
+        cls, key, left, right, center, handle, skip_duplicates=False
+    ):
         """Insert a PathProgressSelection entry with explicit well positions.
 
         Parameters
@@ -60,12 +62,17 @@ class PathProgressSelection(SpyglassMixin, dj.Manual):
         """
         insert_key = dict(key)
         insert_key.update(
-            left_x=left[0], left_y=left[1],
-            right_x=right[0], right_y=right[1],
-            center_x=center[0], center_y=center[1],
-            handle_x=handle[0], handle_y=handle[1],
+            left_x=left[0],
+            left_y=left[1],
+            right_x=right[0],
+            right_y=right[1],
+            center_x=center[0],
+            center_y=center[1],
+            handle_x=handle[0],
+            handle_y=handle[1],
         )
         cls.insert1(insert_key, skip_duplicates=skip_duplicates)
+
 
 @schema
 class PathProgress(SpyglassMixin, dj.Computed):
@@ -98,20 +105,31 @@ class PathProgress(SpyglassMixin, dj.Computed):
             .reset_index()
         )
 
-        forktrack_results = pd.DataFrame((ForkTrackEvents() &{'nwb_file_name': nwb_file_name, 'epoch': selection["epoch"]}).fetch('forktrack_results')[0])
+        # Restricted by `key`: `epoch` is a secondary attribute, so restricting
+        # on it ignores which ForkTrackParams and position source produced
+        # these events. PathProgressSelection declares `-> ForkTrackEvents`.
+        forktrack_results = pd.DataFrame(
+            (ForkTrackEvents & key).fetch1("forktrack_results")
+        )
 
         track_graph_name = selection["track_graph_name"]
-        track_graph = (sgpl.TrackGraph & {"track_graph_name": track_graph_name }).get_networkx_track_graph()
-        edge_order = (sgpl.TrackGraph & {"track_graph_name": track_graph_name }).fetch1("linear_edge_order")
-        edge_spacing = (sgpl.TrackGraph & {"track_graph_name": track_graph_name }).fetch1("linear_edge_spacing")
+        track_graph = (
+            sgpl.TrackGraph & {"track_graph_name": track_graph_name}
+        ).get_networkx_track_graph()
+        edge_order = (
+            sgpl.TrackGraph & {"track_graph_name": track_graph_name}
+        ).fetch1("linear_edge_order")
+        edge_spacing = (
+            sgpl.TrackGraph & {"track_graph_name": track_graph_name}
+        ).fetch1("linear_edge_spacing")
         edge_order = [(int(a), int(b)) for a, b in edge_order]
 
         env = Environment.from_graph(
-        track_graph,
-        edge_order=edge_order,
-        edge_spacing=edge_spacing,
-        bin_size=2.5,
-        name=track_graph_name ,
+            track_graph,
+            edge_order=edge_order,
+            edge_spacing=edge_spacing,
+            bin_size=2.5,
+            name=track_graph_name,
         )
 
         well_positions = {
@@ -162,33 +180,32 @@ class PathProgress(SpyglassMixin, dj.Computed):
         list
             [nwb_file_name, final_df, epoch]
         """
-        forktrack_results["trajectory"] = forktrack_results.apply(infer_trajectory, axis=1)
+        forktrack_results["trajectory"] = forktrack_results.apply(
+            infer_trajectory, axis=1
+        )
 
         linear_position_df = pd.merge_asof(
-        linear_position_df,
-        forktrack_results[["time", "trajectory"]].sort_values("time"),
-        on="time",
-        direction="backward"
-         )
+            linear_position_df,
+            forktrack_results[["time", "trajectory"]].sort_values("time"),
+            on="time",
+            direction="backward",
+        )
 
-        print(linear_position_df["trajectory"].value_counts(dropna=False))
+        logger.info(linear_position_df["trajectory"].value_counts(dropna=False))
 
         position_info = linear_position_df
 
-        goal_positions_2d = {
-            "left_arm":  np.array([well_positions["left"]]),
-            "right_arm": np.array([well_positions["right"]]),
-            "center":    np.array([well_positions["center"]]),
-            "handle":    np.array([well_positions["handle"]]),
-        }
-
         # Convert 2D positions to bin indices
         start_bin = env.bin_at(np.array([well_positions["handle"]]))[0]  # home
-        left_bin  = env.bin_at(np.array([well_positions["left"]]))[0]
+        left_bin = env.bin_at(np.array([well_positions["left"]]))[0]
         right_bin = env.bin_at(np.array([well_positions["right"]]))[0]
         center_bin = env.bin_at(np.array([well_positions["center"]]))[0]
 
-        print(start_bin, left_bin, right_bin, center_bin)  # verify these are valid (>= 0)
+        # All four must be valid bin indices (>= 0).
+        logger.info(
+            f"bins: start={start_bin} left={left_bin} "
+            f"right={right_bin} center={center_bin}"
+        )
 
         _orig_to_scipy_sparse_array = nx.to_scipy_sparse_array
 
@@ -201,31 +218,34 @@ class PathProgress(SpyglassMixin, dj.Computed):
         nx.to_scipy_sparse_array = _patched_to_scipy_sparse_array
 
         trajectory_goals = {
-            "handle_to_left":  (left_bin, start_bin),
-            "left_to_handle":  (start_bin,  left_bin),
+            "handle_to_left": (left_bin, start_bin),
+            "left_to_handle": (start_bin, left_bin),
             "handle_to_right": (right_bin, start_bin),
             "right_to_handle": (start_bin, right_bin),
-            "left_to_right":   (left_bin,  right_bin),
-            "right_to_left":   (right_bin, left_bin),
+            "left_to_right": (left_bin, right_bin),
+            "right_to_left": (right_bin, left_bin),
         }
-
 
         xy_cols = ["projected_x_position", "projected_y_position"]
         finite_mask = np.isfinite(position_info[xy_cols].values).all(axis=1)
-        print(f"Dropping {(~finite_mask).sum()} of {len(position_info)} rows")
+        logger.info(
+            f"Dropping {(~finite_mask).sum()} of {len(position_info)} rows"
+        )
 
         position_info = position_info.loc[finite_mask].reset_index(drop=True)
-        linear_position_df = linear_position_df.loc[finite_mask].reset_index(drop=True)
+        linear_position_df = linear_position_df.loc[finite_mask].reset_index(
+            drop=True
+        )
 
         position_bins = env.bin_at(position_info[xy_cols].values).astype(int)
 
         start_bins = np.full(len(position_bins), -1)
-        goal_bins  = np.full(len(position_bins), -1)
+        goal_bins = np.full(len(position_bins), -1)
 
         for traj, (s, g) in trajectory_goals.items():
             mask = (linear_position_df["trajectory"] == traj).values
             start_bins[mask] = s
-            goal_bins[mask]  = g
+            goal_bins[mask] = g
 
         progress = path_progress(
             position_bins,
@@ -239,7 +259,9 @@ class PathProgress(SpyglassMixin, dj.Computed):
         final_df["epoch"] = epoch
 
         plt.figure(figsize=(12, 4))
-        for traj, g in linear_position_df.dropna(subset=["trajectory_progress"]).groupby("trajectory"):
+        for traj, g in linear_position_df.dropna(
+            subset=["trajectory_progress"]
+        ).groupby("trajectory"):
             plt.scatter(g["time"], g["trajectory_progress"], s=4, label=traj)
 
         plt.xlabel("Time")
@@ -250,7 +272,11 @@ class PathProgress(SpyglassMixin, dj.Computed):
         plt.tight_layout()
         plt.show()
 
-        return [nwb_file_name, final_df,epoch,]
+        return [
+            nwb_file_name,
+            final_df,
+            epoch,
+        ]
 
     def make_insert(self, key, nwb_file_name, final_df, epoch):
         """Write results to NWB and insert into PathProgress.
@@ -281,7 +307,9 @@ class PathProgress(SpyglassMixin, dj.Computed):
             dict(
                 **key,
                 epoch=epoch,
-                pathprogress_results=final_df["trajectory"].value_counts(dropna=False).to_dict(),
+                pathprogress_results=final_df["trajectory"]
+                .value_counts(dropna=False)
+                .to_dict(),
                 analysis_file_name=analysis_file,
                 trial_object_id=obj_id,
             )
@@ -291,6 +319,7 @@ class PathProgress(SpyglassMixin, dj.Computed):
 # =====================================================
 # HELPER FUNCTIONS
 # =====================================================
+
 
 def get_first_pokes_after_well_change(poke_df):
     """
@@ -318,6 +347,7 @@ def get_first_pokes_after_well_change(poke_df):
     ].reset_index(drop=True)
     return first_pokes
 
+
 def normalize_well(name):
     if pd.isna(name):
         return None
@@ -326,10 +356,14 @@ def normalize_well(name):
         return name
     return name
 
+
+# REVIEW: this infers a trajectory from prev_well and well only. It also read
+# row["trial_type"] (Inbound/Outbound) and ignored it -- that dead assignment is
+# gone, but if trial type should affect the result, the logic is missing.
+# Mirrored in notebooks/pathprogression_notebook.ipynb.
 def infer_trajectory(row):
     prev_well = normalize_well(row["prev_well"])
     well = normalize_well(row["well_name"])
-    trial_type = str(row["trial_type"]).lower() if not pd.isna(row["trial_type"]) else ""
 
     # center-out
     if prev_well == "center" and well == "left":
@@ -349,7 +383,6 @@ def infer_trajectory(row):
     if prev_well == "right" and well == "handle":
         return "right_to_handle"
 
-
     # if the row is side-to-side, keep it separate or ignore it
     if prev_well == "left" and well == "right":
         return "left_to_right"
@@ -362,6 +395,5 @@ def infer_trajectory(row):
         return "handle_to_left"
     if prev_well == "handle" and well == "center":
         return "handle_to_center"
-
 
     return np.nan

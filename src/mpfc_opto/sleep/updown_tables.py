@@ -14,13 +14,12 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import hilbert
 
-from spyglass.common import IntervalList
 from spyglass.common.custom_nwbfile import AnalysisNwbfile
 from spyglass.lfp.analysis.v1 import lfp_band
 from spyglass.spikesorting.analysis.v1.group import SortedSpikesGroup
-from spyglass.utils import SpyglassMixin
+from spyglass.utils import SpyglassMixin, logger
 
-from sleep.sleep_table_dmr import SleepScoring
+from mpfc_opto.sleep.sleep_table import SleepScoring
 
 schema = dj.schema("denissemorales_updownstates")
 
@@ -73,7 +72,10 @@ class UpDownStateParams(SpyglassMixin, dj.Lookup):
             raise ValueError(
                 f"Invalid method '{row['method']}'. Must be one of: {VALID_METHODS}"
             )
-        if abs(row.get("lfp_weight", 0) + row.get("mua_weight", 0) - 1.0) > 1e-6:
+        if (
+            abs(row.get("lfp_weight", 0) + row.get("mua_weight", 0) - 1.0)
+            > 1e-6
+        ):
             raise ValueError("lfp_weight + mua_weight must equal 1.0")
         super().insert1(row, **kwargs)
 
@@ -108,15 +110,21 @@ class UpDownStates(SpyglassMixin, dj.Computed):
     trial_object_id: varchar(40)
     """
 
-    def make(self, key):
-        fetch_dict = self._fetch_data(key)
-        result = self._compute_states(key, fetch_dict)
-        self._store_results(key, result, fetch_dict["nwb_file_name"])
+    # Tri-part make, for the same reason as SleepScoring: the detection work
+    # belongs outside the populate transaction, which is then held open only
+    # for the insert.
 
-    # ==================== Tri-part helpers ====================
+    # Each return is a tuple because DataJoint unpacks it into the next stage:
+    # make_fetch -> make_compute -> make_insert.
 
-    def _fetch_data(self, key):
-        """Fetch all upstream data needed for up/down detection."""
+    def make_fetch(self, key):
+        """Fetch all upstream data needed for up/down detection.
+
+        Returns
+        -------
+        tuple
+            A single element, the dict consumed by `make_compute`.
+        """
         params = (UpDownStateParams & key).fetch1()
         sel = (UpDownStateSelection & key).fetch1()
         nwb_file_name = sel["nwb_file_name"]
@@ -140,20 +148,33 @@ class UpDownStates(SpyglassMixin, dj.Computed):
         so_timestamps = so_df.index.values
 
         # --- MUA via SortedSpikesGroup ---
-        spike_indicator = SortedSpikesGroup.get_spike_indicator(key, so_timestamps)
-        mua_rate = spike_indicator.sum(axis=1)  # sum across units → population rate
+        spike_indicator = SortedSpikesGroup.get_spike_indicator(
+            key, so_timestamps
+        )
+        mua_rate = spike_indicator.sum(
+            axis=1
+        )  # sum across units → population rate
 
-        return {
-            "params": params,
-            "nwb_file_name": nwb_file_name,
-            "so_signal": so_signal,
-            "so_timestamps": so_timestamps,
-            "mua_rate": mua_rate,
-            "nrem_intervals": nrem_intervals,
-        }
+        return (
+            {
+                "params": params,
+                "nwb_file_name": nwb_file_name,
+                "so_signal": so_signal,
+                "so_timestamps": so_timestamps,
+                "mua_rate": mua_rate,
+                "nrem_intervals": nrem_intervals,
+            },
+        )
 
-    def _compute_states(self, key, fetch_dict):
-        """Detect UP/DOWN states within NREM intervals; no DB access."""
+    def make_compute(self, key, fetch_dict):
+        """Detect UP/DOWN states within NREM intervals; no DB access.
+
+        Returns
+        -------
+        tuple
+            `(result, nwb_file_name)`. The file name travels through here
+            because `make_insert` receives only what this returns.
+        """
         params = fetch_dict["params"]
         so_signal = fetch_dict["so_signal"]
         so_timestamps = fetch_dict["so_timestamps"]
@@ -163,19 +184,27 @@ class UpDownStates(SpyglassMixin, dj.Computed):
         fs = 1.0 / np.median(np.diff(so_timestamps))
 
         if params["so_smoothing"] > 0:
-            so_signal = gaussian_filter1d(so_signal, sigma=params["so_smoothing"] * fs)
+            so_signal = gaussian_filter1d(
+                so_signal, sigma=params["so_smoothing"] * fs
+            )
         if params["mua_smoothing"] > 0:
-            mua_rate = gaussian_filter1d(mua_rate, sigma=params["mua_smoothing"] * fs)
+            mua_rate = gaussian_filter1d(
+                mua_rate, sigma=params["mua_smoothing"] * fs
+            )
 
         nrem_mask = _build_nrem_mask(so_timestamps, nrem_intervals)
 
         method = params["method"]
         if method == "threshold":
-            states = self._threshold_detection(so_signal, mua_rate, nrem_mask, params)
+            states = self._threshold_detection(
+                so_signal, mua_rate, nrem_mask, params
+            )
         elif method == "gmm":
             states = self._gmm_detection(so_signal, mua_rate, nrem_mask, params)
         elif method == "hilbert":
-            states = self._hilbert_detection(so_signal, mua_rate, nrem_mask, params)
+            states = self._hilbert_detection(
+                so_signal, mua_rate, nrem_mask, params
+            )
 
         states = _enforce_min_duration(
             states,
@@ -190,26 +219,41 @@ class UpDownStates(SpyglassMixin, dj.Computed):
         down_duration = float(np.sum([e - s for s, e in down_intervals]))
         up_duration = float(np.sum([e - s for s, e in up_intervals]))
 
-        return {
+        result = {
             "states": states,
             "timestamps": so_timestamps,
             "down_duration": down_duration,
             "up_duration": up_duration,
-            "down_percentage": 100 * down_duration / nrem_time if nrem_time > 0 else 0.0,
-            "up_percentage": 100 * up_duration / nrem_time if nrem_time > 0 else 0.0,
+            "down_percentage": (
+                100 * down_duration / nrem_time if nrem_time > 0 else 0.0
+            ),
+            "up_percentage": (
+                100 * up_duration / nrem_time if nrem_time > 0 else 0.0
+            ),
             "n_down_states": len(down_intervals),
             "n_up_states": len(up_intervals),
-            "mean_down_duration": float(np.mean([e - s for s, e in down_intervals])) if len(down_intervals) else 0.0,
-            "mean_up_duration": float(np.mean([e - s for s, e in up_intervals])) if len(up_intervals) else 0.0,
+            "mean_down_duration": (
+                float(np.mean([e - s for s, e in down_intervals]))
+                if len(down_intervals)
+                else 0.0
+            ),
+            "mean_up_duration": (
+                float(np.mean([e - s for s, e in up_intervals]))
+                if len(up_intervals)
+                else 0.0
+            ),
         }
+        return result, fetch_dict["nwb_file_name"]
 
-    def _store_results(self, key, result, nwb_file_name):
+    def make_insert(self, key, result, nwb_file_name):
         """Write results to NWB and insert DB row."""
         with AnalysisNwbfile().build(nwb_file_name) as builder:
             obj_id = builder.add_nwb_object(
                 result["states"].astype(np.int32), table_name="state_labels"
             )
-            builder.add_nwb_object(result["timestamps"], table_name="timestamps")
+            builder.add_nwb_object(
+                result["timestamps"], table_name="timestamps"
+            )
             analysis_file_name = builder.analysis_file_name
 
         self.insert1(
@@ -240,14 +284,22 @@ class UpDownStates(SpyglassMixin, dj.Computed):
         n = len(so_signal)
         states = np.full(n, -1)  # -1 = outside NREM
 
-        lfp_thresh = np.percentile(np.abs(so_signal[nrem_mask]), params["lfp_down_percentile"])
-        mua_thresh = np.percentile(mua_rate[nrem_mask], params["mua_down_percentile"])
+        lfp_thresh = np.percentile(
+            np.abs(so_signal[nrem_mask]), params["lfp_down_percentile"]
+        )
+        mua_thresh = np.percentile(
+            mua_rate[nrem_mask], params["mua_down_percentile"]
+        )
 
         lfp_score = np.abs(so_signal) / (lfp_thresh + 1e-10)
         mua_score = mua_rate / (mua_thresh + 1e-10)
-        combined = params["lfp_weight"] * lfp_score + params["mua_weight"] * mua_score
+        combined = (
+            params["lfp_weight"] * lfp_score + params["mua_weight"] * mua_score
+        )
 
-        states[nrem_mask] = (combined[nrem_mask] >= 1.0).astype(int)  # 0=DOWN, 1=UP
+        states[nrem_mask] = (combined[nrem_mask] >= 1.0).astype(
+            int
+        )  # 0=DOWN, 1=UP
         return states
 
     def _gmm_detection(self, so_signal, mua_rate, nrem_mask, params):
@@ -265,7 +317,9 @@ class UpDownStates(SpyglassMixin, dj.Computed):
         x = np.column_stack([np.abs(so_signal[nrem_mask]), mua_rate[nrem_mask]])
         x_scaled = StandardScaler().fit_transform(x)
 
-        gmm = GaussianMixture(n_components=2, covariance_type="full", random_state=42)
+        gmm = GaussianMixture(
+            n_components=2, covariance_type="full", random_state=42
+        )
         labels = gmm.fit_predict(x_scaled)
 
         mua_means = [np.mean(mua_rate[nrem_mask][labels == i]) for i in (0, 1)]
@@ -279,10 +333,14 @@ class UpDownStates(SpyglassMixin, dj.Computed):
         states = np.full(n, -1)
 
         phase = np.angle(hilbert(so_signal))
-        mua_thresh = np.percentile(mua_rate[nrem_mask], params["mua_down_percentile"])
+        mua_thresh = np.percentile(
+            mua_rate[nrem_mask], params["mua_down_percentile"]
+        )
 
         # Trough = phase near ±π (was incorrectly > π/2, catching most of the cycle)
-        near_trough = np.abs(phase) > (np.pi * 2 / 3)  # last ~third of cycle around trough
+        near_trough = np.abs(phase) > (
+            np.pi * 2 / 3
+        )  # last ~third of cycle around trough
 
         low_mua = mua_rate < mua_thresh
 
@@ -290,9 +348,11 @@ class UpDownStates(SpyglassMixin, dj.Computed):
             near_trough[nrem_mask] & low_mua[nrem_mask], 0, 1
         )
 
-        print(f"near_trough (NREM): {near_trough[nrem_mask].mean():.2%}")
-        print(f"low_mua (NREM): {low_mua[nrem_mask].mean():.2%}")
-        print(f"joint (NREM): {(near_trough[nrem_mask] & low_mua[nrem_mask]).mean():.2%}")
+        logger.info(f"near_trough (NREM): {near_trough[nrem_mask].mean():.2%}")
+        logger.info(f"low_mua (NREM): {low_mua[nrem_mask].mean():.2%}")
+        logger.info(
+            f"joint (NREM): {(near_trough[nrem_mask] & low_mua[nrem_mask]).mean():.2%}"
+        )
         return states
 
     # ==================== Visualisation ====================
@@ -343,8 +403,11 @@ class UpDownStates(SpyglassMixin, dj.Computed):
 
         # --- Build figure: 2 stacked subplots sharing x-axis ---
         fig, (ax_lfp, ax_mua) = plt.subplots(
-            2, 1, figsize=figsize, sharex=True,
-            gridspec_kw={"height_ratios": [2, 1]}
+            2,
+            1,
+            figsize=figsize,
+            sharex=True,
+            gridspec_kw={"height_ratios": [2, 1]},
         )
 
         # Helper: shade DOWN states on a given axis
@@ -358,9 +421,11 @@ class UpDownStates(SpyglassMixin, dj.Computed):
                     in_down = True
                 elif st != 0 and in_down:
                     ax.axvspan(
-                        down_start, t[i - 1],
-                        alpha=0.25, color="steelblue",
-                        label="DOWN" if not labeled else "_nolegend_"
+                        down_start,
+                        t[i - 1],
+                        alpha=0.25,
+                        color="steelblue",
+                        label="DOWN" if not labeled else "_nolegend_",
                     )
                     in_down = False
                     labeled = True
@@ -368,7 +433,9 @@ class UpDownStates(SpyglassMixin, dj.Computed):
                 ax.axvspan(down_start, t[-1], alpha=0.25, color="steelblue")
 
         # LFP panel
-        ax_lfp.plot(so_t, so_sig, color="black", linewidth=0.6, label="LFP (SO)")
+        ax_lfp.plot(
+            so_t, so_sig, color="black", linewidth=0.6, label="LFP (SO)"
+        )
         _shade_states(ax_lfp)
         ax_lfp.set_ylabel("LFP amplitude (a.u.)")
         ax_lfp.legend(loc="upper right", fontsize=8)
@@ -383,10 +450,14 @@ class UpDownStates(SpyglassMixin, dj.Computed):
 
         # Stats annotation
         n_down, n_up, mean_down, mean_up = self.fetch1(
-            "n_down_states", "n_up_states", "mean_down_duration", "mean_up_duration"
+            "n_down_states",
+            "n_up_states",
+            "mean_down_duration",
+            "mean_up_duration",
         )
         ax_lfp.text(
-            0.01, 0.97,
+            0.01,
+            0.97,
             f"DOWN: n={n_down}, mean={mean_down:.2f}s\nUP:   n={n_up}, mean={mean_up:.2f}s",
             transform=ax_lfp.transAxes,
             verticalalignment="top",
@@ -399,6 +470,7 @@ class UpDownStates(SpyglassMixin, dj.Computed):
 
 
 # ==================== Module-level helpers ====================
+
 
 def _build_nrem_mask(timestamps, nrem_intervals):
     """Boolean mask over timestamps falling within any NREM interval."""

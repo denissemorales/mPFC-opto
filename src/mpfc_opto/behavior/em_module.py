@@ -1,7 +1,14 @@
+import logging
+
 import matplotlib.pyplot as plt
-import FiltersEM as ff
 import numpy as np
 import pandas as pd
+
+from mpfc_opto.behavior import filters_em as ff
+
+# Standard library logging, not spyglass's: this module and filters_em define
+# no tables and are tested without spyglass installed.
+logger = logging.getLogger(__name__)
 
 # Has just main functions which call others that do the heavy lifting
 
@@ -11,9 +18,14 @@ import pandas as pd
 
 ################################
 def RunEM(
-    df, p_init=None, fig_ax_list=None, trial_number=None, color="b", label=None
+    df,
+    p_init=None,
+    fig_ax_list=None,
+    trial_number=None,
+    color="b",
+    label=None,
+    figsize=(6, 3),
 ):
-    startflag = 0
     sigma2e = 0.5**2  # start guess
     sigma_init = sigma2e
 
@@ -29,7 +41,7 @@ def RunEM(
     else:
         mu = 3.0
 
-    print("sigma2e:", sigma2e)
+    logger.info(f"sigma2e: {sigma2e}")
     x_post, sigma2_post, sigma2e, sigma_init, converge_flag = ff.EM(
         df.y, mu, sigma2e, x_init, sigma_init
     )

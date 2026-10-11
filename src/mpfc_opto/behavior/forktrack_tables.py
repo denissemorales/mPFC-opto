@@ -10,16 +10,17 @@ Author: DMR
 Date: March 2026
 """
 
-from collections import defaultdict
 import datajoint as dj
-import matplotlib.pyplot as plt
+from mpfc_opto.behavior.poke_validation import (
+    validate_poke_events,
+)
 import numpy as np
 import pandas as pd
 import pynwb
 from spyglass.common import Nwbfile
 from spyglass.common.custom_nwbfile import AnalysisNwbfile
 from spyglass.position.position_merge import PositionOutput
-from spyglass.utils import SpyglassMixin
+from spyglass.utils import SpyglassMixin, logger
 
 schema = dj.schema("denissemorales_forktrack")
 
@@ -243,8 +244,12 @@ class ForkTrackEvents(SpyglassMixin, dj.Computed):
         # ----------------------------
         # 2. Separate pokes and pumps
         # ----------------------------
-        poke_df = forktrack_df[forktrack_df.forktrack_name.str.contains("poke")].copy()
-        pump_df = forktrack_df[forktrack_df.forktrack_name.str.contains("pump")].copy()
+        poke_df = forktrack_df[
+            forktrack_df.forktrack_name.str.contains("poke")
+        ].copy()
+        pump_df = forktrack_df[
+            forktrack_df.forktrack_name.str.contains("pump")
+        ].copy()
 
         # Save RAW pokes for alignment
         raw_poke_df = poke_df.copy()
@@ -269,7 +274,11 @@ class ForkTrackEvents(SpyglassMixin, dj.Computed):
             t = r.time
             well = r.well_name
             prev_well = r.prev_well
-            trial_type = "Inbound" if "Center" in well or "Handle" in well else "Outbound"
+            trial_type = (
+                "Inbound"
+                if "Center" in well or "Handle" in well
+                else "Outbound"
+            )
             transition = "" if prev_well is None else f"{prev_well}→{well}"
 
             pump_triggered = False
@@ -355,7 +364,8 @@ class ForkTrackEvents(SpyglassMixin, dj.Computed):
                     }
                 else:
                     offset = np.median(
-                        raw_poke_df.time.to_numpy()[:N] - log_df.time.to_numpy()[:N]
+                        raw_poke_df.time.to_numpy()[:N]
+                        - log_df.time.to_numpy()[:N]
                     )
                     log_df["time"] += offset
 
@@ -397,7 +407,10 @@ class ForkTrackEvents(SpyglassMixin, dj.Computed):
         if "position" in validation_report:
             pos_valid = validation_report["position"]["invalid_pokes"] == 0
 
-        if "log" in validation_report and "warning" not in validation_report["log"]:
+        if (
+            "log" in validation_report
+            and "warning" not in validation_report["log"]
+        ):
             log_valid = all(
                 r["match_rate"] == 1.0
                 for r in validation_report["log"].values()
@@ -407,7 +420,9 @@ class ForkTrackEvents(SpyglassMixin, dj.Computed):
 
         return [nwb_file_name, final_df, validation_report, epoch, is_valid]
 
-    def make_insert(self, key, nwb_file_name, final_df, validation_report, epoch, is_valid):
+    def make_insert(
+        self, key, nwb_file_name, final_df, validation_report, epoch, is_valid
+    ):
         """Write results to NWB and insert into ForkTrackEvents.
 
         Parameters
@@ -451,6 +466,7 @@ class ForkTrackEvents(SpyglassMixin, dj.Computed):
 # HELPER FUNCTIONS
 # =====================================================
 
+
 def get_first_pokes_after_well_change(poke_df):
     """
     Filter a poke DataFrame to only the first poke each time the animal
@@ -476,234 +492,6 @@ def get_first_pokes_after_well_change(poke_df):
         poke_df["well_name"] != poke_df["prev_well"]
     ].reset_index(drop=True)
     return first_pokes
-
-
-def validate_poke_events(
-    well_positions,
-    poke_times,
-    poke_names,
-    poke_values=None,
-    position_times=None,
-    position_x=None,
-    position_y=None,
-    distance_threshold=15.0,
-    max_speed=150.0,
-    plot=True,
-):
-    """
-    Validate poke events based on animal position.
-
-    Parameters
-    ----------
-    well_positions : dict
-        Map of well names to (x, y) coordinates.
-    poke_times : np.array
-        Timestamps of poke events.
-    poke_names : np.array
-        Names of poked wells.
-    poke_values : np.array, optional
-        Poke values (0 or 1). Defaults to all 1s if not provided.
-    position_times : np.array
-        Position sample times.
-    position_x : np.array
-        X coordinates.
-    position_y : np.array
-        Y coordinates.
-    distance_threshold : float
-        Maximum distance from well for a valid poke (in position units).
-    max_speed : float
-        Maximum plausible speed (position units per second).
-    plot : bool
-        Whether to create a validation plot.
-
-    Returns
-    -------
-    dict
-        Dictionary with keys:
-        - 'valid_pokes': DataFrame of valid pokes
-        - 'invalid_pokes': DataFrame of rejected pokes
-        - 'summary': dict with statistics
-    """
-    # ----------------------------------
-    # EARLY EXIT: no position data
-    # ----------------------------------
-    if (
-        position_times is None
-        or position_x is None
-        or position_y is None
-        or len(position_times) == 0
-    ):
-        poke_df = pd.DataFrame(
-            {
-                "time": poke_times,
-                "well_name": poke_names,
-                "value": (
-                    poke_values
-                    if poke_values is not None
-                    else np.ones(len(poke_times), dtype=int)
-                ),
-            }
-        )
-
-        summary = {
-            "total_pokes": len(poke_df),
-            "valid_pokes": len(poke_df),
-            "invalid_pokes": 0,
-            "percent_valid": 100.0 if len(poke_df) else 0,
-            "note": "Position validation skipped (no position data)",
-        }
-
-        return {
-            "valid_pokes": poke_df.reset_index(drop=True),
-            "invalid_pokes": poke_df.iloc[0:0],
-            "summary": summary,
-        }
-
-    if poke_values is None:
-        poke_values = np.ones(len(poke_times), dtype=int)
-
-    animal_positions = interpolate_position(
-        position_times, position_x, position_y, poke_times
-    )
-
-    poke_df = pd.DataFrame(
-        {
-            "time": poke_times,
-            "well_name": poke_names,
-            "value": poke_values,
-            "animal_x": animal_positions[:, 0],
-            "animal_y": animal_positions[:, 1],
-        }
-    )
-
-    # Compute distance to wells
-    distances, well_x, well_y = [], [], []
-    for _, row in poke_df.iterrows():
-        if row["well_name"] in well_positions:
-            wx, wy = well_positions[row["well_name"]]
-            dist = np.sqrt(
-                (row["animal_x"] - wx) ** 2 + (row["animal_y"] - wy) ** 2
-            )
-        else:
-            wx, wy, dist = np.nan, np.nan, np.inf
-        distances.append(dist)
-        well_x.append(wx)
-        well_y.append(wy)
-
-    poke_df["distance_to_well"] = distances
-    poke_df["well_x"] = well_x
-    poke_df["well_y"] = well_y
-
-    # Validate by distance
-    valid_mask = poke_df["distance_to_well"] <= distance_threshold
-    valid_pokes = poke_df[valid_mask].copy()
-    invalid_pokes = poke_df[~valid_mask].copy()
-
-    # Speed check for valid pokes
-    if len(valid_pokes) > 1:
-        speed_mask = np.ones(len(valid_pokes), dtype=bool)
-        for i in range(1, len(valid_pokes)):
-            prev = valid_pokes.iloc[i - 1]
-            curr = valid_pokes.iloc[i]
-
-            dist = np.sqrt(
-                (curr["animal_x"] - prev["animal_x"]) ** 2
-                + (curr["animal_y"] - prev["animal_y"]) ** 2
-            )
-            dt = curr["time"] - prev["time"]
-
-            if dt > 0 and dist / dt > max_speed:
-                speed_mask[i] = False
-
-        invalid_speed_pokes = valid_pokes[~speed_mask]
-        valid_pokes = valid_pokes[speed_mask]
-        invalid_pokes = pd.concat([invalid_pokes, invalid_speed_pokes])
-
-    summary = {
-        "total_pokes": len(poke_df),
-        "valid_pokes": len(valid_pokes),
-        "invalid_pokes": len(invalid_pokes),
-        "percent_valid": (
-            (100 * len(valid_pokes) / len(poke_df)) if len(poke_df) > 0 else 0
-        ),
-    }
-
-    print(f"\nPosition validation summary:")
-    print(f"  Total pokes: {summary['total_pokes']}")
-    print(
-        f"  Valid pokes: {summary['valid_pokes']} ({summary['percent_valid']:.1f}%)"
-    )
-    print(f"  Invalid pokes: {summary['invalid_pokes']}")
-
-    if len(invalid_pokes) > 0:
-        print(f"\nInvalid poke details:")
-        for _, row in invalid_pokes.iterrows():
-            print(
-                f"  {row['well_name']} at t={row['time']:.2f}s, distance={row['distance_to_well']:.1f}"
-            )
-
-    if plot:
-        _plot_position_validation(
-            valid_pokes, invalid_pokes, position_x, position_y,
-            well_positions, distance_threshold,
-        )
-
-    return {
-        "valid_pokes": valid_pokes.reset_index(drop=True),
-        "invalid_pokes": invalid_pokes.reset_index(drop=True),
-        "summary": summary,
-    }
-
-
-def _plot_position_validation(
-    valid_pokes, invalid_pokes, position_x, position_y,
-    well_positions, distance_threshold,
-):
-    """Create visualization of position-based poke validation."""
-    fig, ax = plt.subplots(figsize=(10, 8))
-
-    ax.plot(
-        position_x,
-        position_y,
-        "-",
-        alpha=0.2,
-        linewidth=0.5,
-        label="Trajectory",
-    )
-
-    for well_name, (wx, wy) in well_positions.items():
-        ax.plot(wx, wy, "ko", markersize=10)
-        ax.text(wx, wy, well_name, ha="center", fontsize=9)
-        circle = plt.Circle((wx, wy), distance_threshold, alpha=0.2)
-        ax.add_patch(circle)
-
-    if len(valid_pokes) > 0:
-        ax.plot(
-            valid_pokes["animal_x"],
-            valid_pokes["animal_y"],
-            "go",
-            markersize=8,
-            label="Valid pokes",
-            alpha=0.7,
-        )
-
-    if len(invalid_pokes) > 0:
-        ax.plot(
-            invalid_pokes["animal_x"],
-            invalid_pokes["animal_y"],
-            "rx",
-            markersize=10,
-            markeredgewidth=2,
-            label="Invalid pokes",
-        )
-
-    ax.set_xlabel("X Position")
-    ax.set_ylabel("Y Position")
-    ax.set_title("Position-Based DIO Validation")
-    ax.legend()
-    ax.axis("equal")
-    plt.tight_layout()
-    plt.show()
 
 
 def compare_forktrack_events(extracted_df, forktrack_dict, tolerance=0.001):
@@ -735,9 +523,11 @@ def compare_forktrack_events(extracted_df, forktrack_dict, tolerance=0.001):
         gt_up_times = data["times"][up_mask]
         name_to_gt_times[well_name] = np.sort(gt_up_times)
 
-        print(f"Ground truth for {well_name}: {len(gt_up_times)} UP events")
+        logger.info(
+            f"Ground truth for {well_name}: {len(gt_up_times)} UP events"
+        )
         if len(gt_up_times) > 0:
-            print(
+            logger.info(
                 f"  Time range: {gt_up_times.min():.2f} to {gt_up_times.max():.2f}"
             )
 
@@ -752,9 +542,9 @@ def compare_forktrack_events(extracted_df, forktrack_dict, tolerance=0.001):
             else np.array([])
         )
 
-        print(f"\nProcessed {well_name}: {len(extracted_times)} events")
+        logger.info(f"\nProcessed {well_name}: {len(extracted_times)} events")
         if len(extracted_times) > 0:
-            print(
+            logger.info(
                 f"  Time range: {extracted_times.min():.2f} to {extracted_times.max():.2f}"
             )
 
@@ -783,9 +573,7 @@ def compare_forktrack_events(extracted_df, forktrack_dict, tolerance=0.001):
             "matched": int(matched),
             "missing_in_processed": missing,
             "extra_in_processed": extra,
-            "match_rate": (
-                matched / len(gt_times) if len(gt_times) > 0 else 0
-            ),
+            "match_rate": (matched / len(gt_times) if len(gt_times) > 0 else 0),
         }
 
     return results
@@ -960,39 +748,6 @@ def create_forktrack_dict(parsed_events, dio_name_map):
     return dio_dict
 
 
-def interpolate_position(position_times, position_x, position_y, query_times):
-    """
-    Interpolate x/y position at arbitrary query times.
-
-    Parameters
-    ----------
-    position_times : np.array
-        Strictly increasing array of position sample times.
-    position_x : np.array
-        X coordinates at each sample time.
-    position_y : np.array
-        Y coordinates at each sample time.
-    query_times : np.array
-        Times at which to interpolate position.
-
-    Returns
-    -------
-    np.ndarray
-        Array of shape (N, 2) with interpolated (x, y) positions.
-    """
-    print(query_times.min(), query_times.max())
-    print(position_times[0], position_times[-1])
-
-    position_times = np.asarray(position_times)
-    assert np.all(
-        np.diff(position_times) > 0
-    ), "position_times not strictly increasing"
-
-    interp_x = np.interp(query_times, position_times, position_x)
-    interp_y = np.interp(query_times, position_times, position_y)
-
-    return np.column_stack((interp_x, interp_y))
-
 def compute_performance(final_df, window=10, trial_types=None):
     """
     Compute trial-by-trial correctness and smoothed probability correct
@@ -1045,18 +800,14 @@ def compute_performance(final_df, window=10, trial_types=None):
 
     # Global rolling probability correct (min_periods=1 to avoid NaNs at start)
     df["p_correct_smooth"] = (
-        df["correct"]
-        .astype(float)
-        .rolling(window=window, min_periods=1)
-        .mean()
+        df["correct"].astype(float).rolling(window=window, min_periods=1).mean()
     )
 
     # Per-trial-type rolling probability correct
-    df["p_correct_smooth_per_type"] = (
-        df.groupby("trial_type")["correct"]
-        .transform(
-            lambda x: x.astype(float).rolling(window=window, min_periods=1).mean()
-        )
+    df["p_correct_smooth_per_type"] = df.groupby("trial_type")[
+        "correct"
+    ].transform(
+        lambda x: x.astype(float).rolling(window=window, min_periods=1).mean()
     )
 
     return df.reset_index(drop=True)

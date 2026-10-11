@@ -18,93 +18,99 @@ from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
 import spyglass.lfp as lfp
-from spyglass.common import IntervalList
 from spyglass.common.custom_nwbfile import AnalysisNwbfile
 from spyglass.lfp.analysis.v1 import lfp_band
 from spyglass.position.position_merge import PositionOutput
-from spyglass.utils import SpyglassMixin
-from sleep.pss_dmr import PSSParams, PSSSelection, SleepPSS
+from spyglass.utils import SpyglassMixin, logger
+from mpfc_opto.sleep.pss import SleepPSS
 
 schema = dj.schema("denissemorales_sleepscoring")
 VALID_METHODS = {"gmm", "kmeans", "hierarchical"}
 
-@schema
-class SleepScoringParams(SpyglassMixin, dj.Lookup):
-    definition = """
-    sleep_scoring_params_name: varchar(64)
-    ---
-    # Classification parameters
-    method: varchar(32)              # Classification method (gmm | kmeans | hierarchical)
-    use_hierarchical: bool           # Use two-stage classification
-    use_pss: bool                    # Include power spectrum slope if available
 
-    # Smoothing parameters
-    power_smoothing: float           # Gaussian smoothing sigma for power (seconds)
-    speed_smoothing: float           # Gaussian smoothing sigma for speed (seconds)
-
-    # Constraint parameters
-    apply_constraints: bool          # Apply physiological constraints
-    rem_cannot_follow_wake: bool     # REM cannot directly follow WAKE
-    constraint_max_iterations: int    # Max iterations for constraint enforcement
-
-    # State duration parameters
-    min_duration: float              # Minimum state bout duration (seconds)
-
-    # Wake detection parameters
-    speed_threshold: float           # Speed threshold for wake detection (cm/s)
-    use_speed_for_wake: bool         # Use speed instead of EMG for wake detection
-    """
-
-    contents = [
-        {
-            "sleep_scoring_params_name": "hierarchical",
-            "method": "hierarchical",
-            "use_hierarchical": True,
-            "use_pss": False,
-            "power_smoothing": 0.5,
-            "speed_smoothing": 0.5,
-            "apply_constraints": True,
-            "rem_cannot_follow_wake": True,
-            "constraint_max_iterations": 15,
-            "min_duration": 5.0,
-            "speed_threshold": 3.0,
-            "use_speed_for_wake": True,
-        }
-    ]
-
-    def insert1(self, row, **kwargs):
-        method = row.get("method")
-        if method not in VALID_METHODS:
-            raise ValueError(
-                f"Invalid method '{method}'. Must be one of: {VALID_METHODS}"
-            )
-        super().insert1(row, **kwargs)
-
-
-@schema
-class SleepScoringSelection(SpyglassMixin, dj.Manual):
-    definition = """
-    -> SleepScoringParams
-    target_interval_list_name: varchar(64)
-    nwb_file_name: varchar(64)
-    theta_filter_name='': varchar(64)
-    delta_filter_name='': varchar(64)
-    lfp_merge_id: uuid               # Shared LFP merge ID (theta and delta use different filter_names on the same merge)
-    ---
-    emg_merge_id=null: uuid          # Optional EMG band power merge ID
-    pss_merge_id=null: uuid          # Optional PSS merge ID
-
-    # Position merge
-    pos_merge_id: uuid               # PositionOutput merge ID
-
-    # Sampling rate for power features
-    filter_sampling_rate: float
-
-    emg_filter_name='': varchar(64)
-    pss_filter_name='': varchar(64)
-    """
-
-
+# NOTE: SleepScoringParams is replaced by the duplicate instance below.
+# Python binds the last definition of a name, so this copy never
+# reaches DataJoint. The two were byte-identical when commented out.
+# @schema
+# class SleepScoringParams(SpyglassMixin, dj.Lookup):
+#     definition = """
+#     sleep_scoring_params_name: varchar(64)
+#     ---
+#     # Classification parameters
+#     method: varchar(32)              # Classification method (gmm | kmeans | hierarchical)
+#     use_hierarchical: bool           # Use two-stage classification
+#     use_pss: bool                    # Include power spectrum slope if available
+#
+#     # Smoothing parameters
+#     power_smoothing: float           # Gaussian smoothing sigma for power (seconds)
+#     speed_smoothing: float           # Gaussian smoothing sigma for speed (seconds)
+#
+#     # Constraint parameters
+#     apply_constraints: bool          # Apply physiological constraints
+#     rem_cannot_follow_wake: bool     # REM cannot directly follow WAKE
+#     constraint_max_iterations: int    # Max iterations for constraint enforcement
+#
+#     # State duration parameters
+#     min_duration: float              # Minimum state bout duration (seconds)
+#
+#     # Wake detection parameters
+#     speed_threshold: float           # Speed threshold for wake detection (cm/s)
+#     use_speed_for_wake: bool         # Use speed instead of EMG for wake detection
+#     """
+#
+#     contents = [
+#         {
+#             "sleep_scoring_params_name": "hierarchical",
+#             "method": "hierarchical",
+#             "use_hierarchical": True,
+#             "use_pss": False,
+#             "power_smoothing": 0.5,
+#             "speed_smoothing": 0.5,
+#             "apply_constraints": True,
+#             "rem_cannot_follow_wake": True,
+#             "constraint_max_iterations": 15,
+#             "min_duration": 5.0,
+#             "speed_threshold": 3.0,
+#             "use_speed_for_wake": True,
+#         }
+#     ]
+#
+#     def insert1(self, row, **kwargs):
+#         method = row.get("method")
+#         if method not in VALID_METHODS:
+#             raise ValueError(
+#                 f"Invalid method '{method}'. Must be one of: {VALID_METHODS}"
+#             )
+#         super().insert1(row, **kwargs)
+#
+#
+# NOTE: SleepScoringSelection is replaced by the duplicate instance below.
+# Python binds the last definition of a name, so this copy never
+# reaches DataJoint. The two were byte-identical when commented out.
+# @schema
+# class SleepScoringSelection(SpyglassMixin, dj.Manual):
+#     definition = """
+#     -> SleepScoringParams
+#     target_interval_list_name: varchar(64)
+#     nwb_file_name: varchar(64)
+#     theta_filter_name='': varchar(64)
+#     delta_filter_name='': varchar(64)
+#     lfp_merge_id: uuid               # Shared LFP merge ID (theta and delta use different filter_names on the same merge)
+#     ---
+#     emg_merge_id=null: uuid          # Optional EMG band power merge ID
+#     pss_merge_id=null: uuid          # Optional PSS merge ID
+#
+#     # Position merge
+#     pos_merge_id: uuid               # PositionOutput merge ID
+#
+#     # Sampling rate for power features
+#     filter_sampling_rate: float
+#
+#     emg_filter_name='': varchar(64)
+#     pss_filter_name='': varchar(64)
+#     """
+#
+#
 @schema
 class SleepScoringParams(SpyglassMixin, dj.Lookup):
     definition = """
@@ -199,15 +205,22 @@ class SleepScoring(SpyglassMixin, dj.Computed):
     trial_object_id: varchar(40)
     """
 
-    def make(self, key):
-        fetch_dict = self._fetch_data(key)
-        result = self._compute_states(key, fetch_dict)
-        self._store_results(key, result, fetch_dict["nwb_file_name"])
+    # Tri-part make: DataJoint runs the fetch and the computation outside the
+    # populate transaction and holds it open only for the insert. This table
+    # fits GaussianMixture or KMeans, which is not work to do with a
+    # transaction open.
+    #
+    # Each return is a tuple because DataJoint unpacks it into the next stage:
+    # make_fetch -> make_compute -> make_insert.
 
-    # ==================== Tri-part helpers ====================
+    def make_fetch(self, key):
+        """Fetch all upstream data needed for classification.
 
-    def _fetch_data(self, key):
-        """Fetch all upstream data needed for classification."""
+        Returns
+        -------
+        tuple
+            A single element, the dict consumed by `make_compute`.
+        """
         params = (SleepScoringParams & key).fetch1()
         sel = (SleepScoringSelection & key).fetch1()
         nwb_file_name = sel["nwb_file_name"]
@@ -236,7 +249,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         # Head speed
         head_speed = None
         if sel.get("pos_merge_id") is not None:
-            pos_df = (PositionOutput & {"merge_id": sel["pos_merge_id"]}).fetch1_dataframe()
+            pos_df = (
+                PositionOutput & {"merge_id": sel["pos_merge_id"]}
+            ).fetch1_dataframe()
             head_speed = np.interp(
                 theta_timestamps, pos_df.index.values, pos_df["speed"].values
             )
@@ -245,46 +260,57 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         emg_power = None
         if sel.get("emg_merge_id") is not None and sel.get("emg_filter_name"):
             emg_df = (
-                lfp.LFPOutput
-                & {"merge_id": sel["emg_merge_id"]}
+                lfp.LFPOutput & {"merge_id": sel["emg_merge_id"]}
             ).fetch1_dataframe()
-            print(f"Fetched EMG dataframe with shape {emg_df.shape}")
-            emg_timestamps, emg_corr = self.emg_from_lfp_corr(emg_df, output_fs=2.0)
+            logger.info(f"Fetched EMG dataframe with shape {emg_df.shape}")
+            emg_timestamps, emg_corr = self.emg_from_lfp_corr(
+                emg_df, output_fs=2.0
+            )
             emg_power = np.interp(theta_timestamps, emg_timestamps, emg_corr)
 
         # PSS (optional)
         pss_data = None
         if params["use_pss"]:
-            pss_timestamps = (
+            # One fetch1, not two fetches. As two independent queries there was
+            # no guarantee both returned the same row, so timestamps from one
+            # PSS parameter set could be paired with values from another.
+            #
+            # This restriction is still short of SleepPSS's full key -- it omits
+            # the PSS parameter set and source filter -- so fetch1 raises where
+            # the old code silently took the first row. That is the intended
+            # behaviour: scoring against an unidentified PSS trace is worse than
+            # stopping. Pinning it properly needs a foreign key on the Selection.
+            pss_timestamps, pss_values = (
                 SleepPSS
                 & {
                     "nwb_file_name": sel["nwb_file_name"],
                     "lfp_merge_id": sel["lfp_merge_id"],
                 }
-            ).fetch("pss_timestamps")[0]
-            pss_values = (
-                SleepPSS
-                & {
-                    "nwb_file_name": sel["nwb_file_name"],
-                    "lfp_merge_id": sel["lfp_merge_id"],
-                }
-            ).fetch("pss_values")[0]
-            print(pss_timestamps.shape, pss_values.shape, theta_timestamps.shape)
+            ).fetch1("pss_timestamps", "pss_values")
             pss_data = np.interp(theta_timestamps, pss_timestamps, pss_values)
 
-        return {
-            "params": params,
-            "nwb_file_name": nwb_file_name,
-            "theta_power": theta_power,
-            "delta_power": delta_power,
-            "theta_timestamps": theta_timestamps,
-            "head_speed": head_speed,
-            "emg_power": emg_power,
-            "pss_data": pss_data,
-        }
+        return (
+            {
+                "params": params,
+                "nwb_file_name": nwb_file_name,
+                "theta_power": theta_power,
+                "delta_power": delta_power,
+                "theta_timestamps": theta_timestamps,
+                "head_speed": head_speed,
+                "emg_power": emg_power,
+                "pss_data": pss_data,
+            },
+        )
 
-    def _compute_states(self, key, fetch_dict):
-        """Run the full classification pipeline; no DB access here."""
+    def make_compute(self, key, fetch_dict):
+        """Run the full classification pipeline; no DB access here.
+
+        Returns
+        -------
+        tuple
+            `(result, nwb_file_name)`. The file name travels through here
+            because `make_insert` receives only what this returns.
+        """
         params = fetch_dict["params"]
         theta_timestamps = fetch_dict["theta_timestamps"]
 
@@ -316,10 +342,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             delta = features["delta_power"]
 
             # Score each sleep epoch by how "REM-like" it is (high theta, low delta)
-            rem_score = (
-                theta / (np.percentile(theta[sleep_mask], 1) + 1e-10)
-                - delta / (np.percentile(delta[sleep_mask], 99) + 1e-10)
-            )
+            rem_score = theta / (
+                np.percentile(theta[sleep_mask], 1) + 1e-10
+            ) - delta / (np.percentile(delta[sleep_mask], 99) + 1e-10)
 
             # Only consider sleep epochs
             candidate_scores = np.where(sleep_mask, rem_score, -np.inf)
@@ -343,27 +368,39 @@ class SleepScoring(SpyglassMixin, dj.Computed):
 
             if np.any(rem_mask):
                 states[rem_mask] = 1
-                print(
+                logger.info(
                     f"REM fallback applied: {np.sum(rem_mask)} epochs set to REM "
                     f"({100 * np.sum(rem_mask) / n_sleep:.1f}% of sleep)"
                 )
             else:
-                print("REM fallback: no qualifying epochs found, leaving NREM intact")
+                logger.info(
+                    "REM fallback: no qualifying epochs found, leaving NREM intact"
+                )
 
         # Derive intervals & durations
-        nrem_intervals = self._states_to_intervals(states, theta_timestamps, state=0)
-        rem_intervals = self._states_to_intervals(states, theta_timestamps, state=1)
-        wake_intervals = self._states_to_intervals(states, theta_timestamps, state=2)
+        nrem_intervals = self._states_to_intervals(
+            states, theta_timestamps, state=0
+        )
+        rem_intervals = self._states_to_intervals(
+            states, theta_timestamps, state=1
+        )
+        wake_intervals = self._states_to_intervals(
+            states, theta_timestamps, state=2
+        )
 
         total_time = theta_timestamps[-1] - theta_timestamps[0]
         nrem_duration = float(np.sum([e - s for s, e in nrem_intervals]))
         rem_duration = float(np.sum([e - s for s, e in rem_intervals]))
         wake_duration = float(np.sum([e - s for s, e in wake_intervals]))
 
-        return {
+        result = {
             "states": states,
             "timestamps": theta_timestamps,
-            "intervals": {"nrem": nrem_intervals, "rem": rem_intervals, "wake": wake_intervals},
+            "intervals": {
+                "nrem": nrem_intervals,
+                "rem": rem_intervals,
+                "wake": wake_intervals,
+            },
             "nrem_duration": nrem_duration,
             "rem_duration": rem_duration,
             "wake_duration": wake_duration,
@@ -372,8 +409,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             "wake_percentage": 100 * wake_duration / total_time,
             "params_name": key["sleep_scoring_params_name"],
         }
+        return result, fetch_dict["nwb_file_name"]
 
-    def _store_results(self, key, result, nwb_file_name):
+    def make_insert(self, key, result, nwb_file_name):
         """Write results to the NWB file and insert the DB row.
 
         Uses the context manager pattern so AnalysisNwbfile registration
@@ -384,7 +422,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             obj_id = builder.add_nwb_object(
                 result["states"].astype(np.int32), table_name="state_labels"
             )
-            builder.add_nwb_object(result["timestamps"], table_name="timestamps")
+            builder.add_nwb_object(
+                result["timestamps"], table_name="timestamps"
+            )
             analysis_file_name = builder.analysis_file_name
 
         self.insert1(
@@ -439,7 +479,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         if n_samples < 2:
             raise ValueError("Need at least 2 samples.")
         if n_channels < 2:
-            raise ValueError("Need at least 2 channels to compute pairwise EMG.")
+            raise ValueError(
+                "Need at least 2 channels to compute pairwise EMG."
+            )
 
         fs = 1.0 / float(np.median(np.diff(timestamps)))
 
@@ -459,7 +501,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         win_offsets = np.arange(-half_win, half_win + 1)  # (2*half_win+1,)
 
         # All pairs — channel selection already done upstream
-        pairs = [(j, k) for j in range(n_channels) for k in range(j + 1, n_channels)]
+        pairs = [
+            (j, k) for j in range(n_channels) for k in range(j + 1, n_channels)
+        ]
 
         # Summed zero-lag Pearson correlation across all pairs
         emg_corr = np.zeros(len(center_inds), dtype=float)
@@ -545,7 +589,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
         feature_matrix_scaled = StandardScaler().fit_transform(feature_matrix)
 
         if params["method"] == "gmm":
-            model = GaussianMixture(n_components=3, random_state=42, covariance_type="full")
+            model = GaussianMixture(
+                n_components=3, random_state=42, covariance_type="full"
+            )
         else:
             model = KMeans(n_clusters=3, random_state=42, n_init=10)
 
@@ -564,10 +610,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
 
         use_speed = params.get("use_speed_for_wake", True)
 
-        emg_available = (
-            features.get("emg_power") is not None
-            and not np.allclose(features["emg_power"], 0)
-        )
+        emg_available = features.get(
+            "emg_power"
+        ) is not None and not np.allclose(features["emg_power"], 0)
 
         if emg_available:
             emg = np.asarray(features["emg_power"], dtype=float)
@@ -582,14 +627,16 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             wake_mask = emg_z > thr
 
             wake_fraction = float(np.mean(wake_mask))
-            print(
+            logger.info(
                 f"Wake detection using EMG: threshold={thr:.3f}, "
                 f"wake_fraction={wake_fraction:.3f}"
             )
 
             # Fail-safe: if EMG is too permissive or too sparse, fall back to speed.
             if wake_fraction > 0.6 or wake_fraction < 0.01:
-                print("EMG separation looks bad; falling back to head speed")
+                logger.info(
+                    "EMG separation looks bad; falling back to head speed"
+                )
                 if use_speed and features.get("speed_wake") is not None:
                     wake_mask = features["speed_wake"].astype(bool)
                 else:
@@ -597,11 +644,13 @@ class SleepScoring(SpyglassMixin, dj.Computed):
 
         elif use_speed and features.get("speed_wake") is not None:
             wake_mask = features["speed_wake"].astype(bool)
-            print(f"Wake detection using head speed: {np.sum(wake_mask)} epochs WAKE")
+            logger.info(
+                f"Wake detection using head speed: {np.sum(wake_mask)} epochs WAKE"
+            )
 
         else:
             wake_mask = np.zeros(n, dtype=bool)
-            print("No EMG or head speed: assuming all sleep")
+            logger.info("No EMG or head speed: assuming all sleep")
 
         sleep_mask = ~wake_mask
         states[wake_mask] = 2
@@ -617,9 +666,16 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             dt_valid = dt_ratio[valid]
 
             if len(dt_valid) >= min_sleep_epochs:
-                if params.get("sleep_classification_method", "kmeans") == "kmeans":
-                    x_scaled = StandardScaler().fit_transform(dt_valid.reshape(-1, 1))
-                    labels = KMeans(n_clusters=2, random_state=42, n_init=10).fit_predict(x_scaled)
+                if (
+                    params.get("sleep_classification_method", "kmeans")
+                    == "kmeans"
+                ):
+                    x_scaled = StandardScaler().fit_transform(
+                        dt_valid.reshape(-1, 1)
+                    )
+                    labels = KMeans(
+                        n_clusters=2, random_state=42, n_init=10
+                    ).fit_predict(x_scaled)
                     dt_means = [np.mean(dt_valid[labels == i]) for i in (0, 1)]
                     nrem_cluster = np.argmax(dt_means)
                     sleep_states = np.where(labels == nrem_cluster, 0, 1)
@@ -628,14 +684,16 @@ class SleepScoring(SpyglassMixin, dj.Computed):
                     sleep_states = np.where(dt_valid >= threshold, 0, 1)
 
                 states[sleep_indices_valid] = sleep_states
-                print(
+                logger.info(
                     f"NREM epochs: {np.sum(sleep_states == 0)}, "
                     f"REM epochs: {np.sum(sleep_states == 1)}"
                 )
             else:
-                print("Not enough valid sleep epochs for NREM/REM classification")
+                logger.info(
+                    "Not enough valid sleep epochs for NREM/REM classification"
+                )
         else:
-            print("Not enough sleep epochs to classify NREM/REM")
+            logger.info("Not enough sleep epochs to classify NREM/REM")
 
         # REM fallback — find high-theta / low-delta epochs within sleep, but cap assignment
         if np.mean(states == 1) < 0.02 and np.any(sleep_mask):
@@ -643,10 +701,9 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             delta = features["delta_power"]
 
             # Score each sleep epoch by how "REM-like" it is (high theta, low delta)
-            rem_score = (
-                theta / (np.percentile(theta[sleep_mask], 1) + 1e-10)
-                - delta / (np.percentile(delta[sleep_mask], 99) + 1e-10)
-            )
+            rem_score = theta / (
+                np.percentile(theta[sleep_mask], 1) + 1e-10
+            ) - delta / (np.percentile(delta[sleep_mask], 99) + 1e-10)
 
             # Only consider sleep epochs
             candidate_scores = np.where(sleep_mask, rem_score, -np.inf)
@@ -670,12 +727,14 @@ class SleepScoring(SpyglassMixin, dj.Computed):
 
             if np.any(rem_mask):
                 states[rem_mask] = 1
-                print(
+                logger.info(
                     f"REM fallback applied: {np.sum(rem_mask)} epochs set to REM "
                     f"({100 * np.sum(rem_mask) / n_sleep:.1f}% of sleep)"
                 )
             else:
-                print("REM fallback: no qualifying epochs found, leaving NREM intact")
+                logger.info(
+                    "REM fallback: no qualifying epochs found, leaving NREM intact"
+                )
 
         return states
 
@@ -686,30 +745,45 @@ class SleepScoring(SpyglassMixin, dj.Computed):
             c: {
                 "delta": np.mean(features["delta_power"][cluster_labels == c]),
                 "theta": np.mean(features["theta_power"][cluster_labels == c]),
-                "emg": np.mean(features["emg_power"][cluster_labels == c])
-                if features.get("emg_power") is not None
-                else 0.0,
-                "dt_ratio": np.mean(features["delta_theta_ratio"][cluster_labels == c]),
+                "emg": (
+                    np.mean(features["emg_power"][cluster_labels == c])
+                    if features.get("emg_power") is not None
+                    else 0.0
+                ),
+                "dt_ratio": np.mean(
+                    features["delta_theta_ratio"][cluster_labels == c]
+                ),
             }
             for c in range(n_clusters)
         }
 
         nrem_cluster = np.argmax(
-            [cluster_means[c]["dt_ratio"] - cluster_means[c]["emg"] for c in range(n_clusters)]
+            [
+                cluster_means[c]["dt_ratio"] - cluster_means[c]["emg"]
+                for c in range(n_clusters)
+            ]
         )
         state_mapping = {nrem_cluster: 0}
 
         remaining = [c for c in range(n_clusters) if c != nrem_cluster]
         if len(remaining) > 1:
-            wake_cluster = remaining[np.argmax([cluster_means[c]["emg"] for c in remaining])]
+            wake_cluster = remaining[
+                np.argmax([cluster_means[c]["emg"] for c in remaining])
+            ]
             state_mapping[wake_cluster] = 2
             rem_cluster = [c for c in remaining if c != wake_cluster][0]
             state_mapping[rem_cluster] = 1
         else:
             r = remaining[0]
-            state_mapping[r] = 2 if cluster_means[r]["emg"] > cluster_means[nrem_cluster]["emg"] else 1
+            state_mapping[r] = (
+                2
+                if cluster_means[r]["emg"] > cluster_means[nrem_cluster]["emg"]
+                else 1
+            )
 
-        return np.array([state_mapping.get(label, 0) for label in cluster_labels])
+        return np.array(
+            [state_mapping.get(label, 0) for label in cluster_labels]
+        )
 
     # ==================== Post-processing ====================
 
@@ -739,7 +813,10 @@ class SleepScoring(SpyglassMixin, dj.Computed):
 
         # Remove single-point transitions
         for i in range(1, len(smoothed) - 1):
-            if smoothed[i] != smoothed[i - 1] and smoothed[i] != smoothed[i + 1]:
+            if (
+                smoothed[i] != smoothed[i - 1]
+                and smoothed[i] != smoothed[i + 1]
+            ):
                 smoothed[i] = smoothed[i - 1]
 
         # Enforce minimum bout duration

@@ -1,7 +1,11 @@
+import logging
 from operator import truediv
 
 import numpy as np
-from pylab import *
+
+# Standard library logging, not spyglass's: this module defines no tables and
+# is tested without spyglass installed.
+logger = logging.getLogger(__name__)
 
 """
 ------------------------------------------------------------------------------
@@ -14,7 +18,12 @@ def TransformToProb(meanv, sigma2, mu):
     # compute upper and lower bounds of conf intervals by simulation
     NUM_SAMPS = 10000
 
-    np.random.seed(0)  # start at same random number each time
+    # A local generator, not np.random.seed: reseeding the global RNG would
+    # silently reset the stream of whatever called this. RandomState and not
+    # default_rng, because RandomState(0) draws exactly what seed(0) did and so
+    # the confidence bounds below are unchanged; default_rng uses a different
+    # algorithm and would move every number.
+    rng = np.random.RandomState(0)
     T = len(meanv)
     p = np.zeros(T)
     pll = np.zeros(T)
@@ -23,7 +32,7 @@ def TransformToProb(meanv, sigma2, mu):
     sigma = np.sqrt(sigma2)
 
     for t in range(T):
-        s = np.random.normal(meanv[t], sigma[t], NUM_SAMPS)
+        s = rng.normal(meanv[t], sigma[t], NUM_SAMPS)
         ps = map(truediv, np.exp(s + mu), (1.0 + np.exp(s + mu)))
         ps = list(ps)  # JAG ADDED
         sorted_ps = sorted(ps)
@@ -109,9 +118,9 @@ def BackwardFilter(x_post, x_prior, sigma2_post, sigma2_prior):
 
     T = len(x_post)
     # Initial conditions
-    x_T = zeros(T)
+    x_T = np.zeros(T)
     x_T[T - 1] = x_post[T - 1]
-    sigma2_T = zeros(T)
+    sigma2_T = np.zeros(T)
     sigma2_T[T - 1] = sigma2_post[T - 1]
     A = np.zeros(T)
 
@@ -168,11 +177,11 @@ def EM(xx, mu, sigma2e, x_init, sigma_init):
 
     if its == max_its:
         converge_flag = 1
-        print("Did not converge in 3000 iterations")
+        logger.warning("Did not converge in 3000 iterations")
     else:
         converge_flag = 0
-        print("Converged after " + str(its) + " iterations")
-        print("sigma2e is ", sigma2e)
+        logger.info("Converged after " + str(its) + " iterations")
+        logger.info(f"sigma2e is {sigma2e}")
 
     x_post = x_post[1:]
     sigma2_post = sigma2_post[1:]
@@ -219,14 +228,12 @@ def FwdFilterEM(y, delta, x_init, sigma2_init, sigma2e, mu):
     T = len(y)
 
     # Data structures
-    x_prior = zeros(T + 1)
-    x_post = zeros(T + 1)
-    sd1 = zeros(T + 1)
+    x_prior = np.zeros(T + 1)
+    x_post = np.zeros(T + 1)
+    sd1 = np.zeros(T + 1)
 
-    next_pred_error = zeros(T + 1)
-
-    sigma2_prior = zeros(T + 1)
-    sigma2_post = zeros(T + 1)
+    sigma2_prior = np.zeros(T + 1)
+    sigma2_post = np.zeros(T + 1)
 
     # FORWARD FILTER
     x_post[0] = x_init
@@ -240,7 +247,7 @@ def FwdFilterEM(y, delta, x_init, sigma2_init, sigma2e, mu):
         x_post[t] = NewtonSolve(x_prior[t], sigma2_prior[t], y[t - 1], 1, mu)
         # x_post[t]  = x_prior[t] + sigma2_post[t]*(y[t] - pt)
 
-        pt = exp(mu + x_post[t]) / (1.0 + exp(mu + x_post[t]))
+        pt = np.exp(mu + x_post[t]) / (1.0 + np.exp(mu + x_post[t]))
 
         sigma2_post[t] = 1.0 / (1.0 / sigma2_prior[t] + pt * (1 - pt))
 
@@ -251,9 +258,11 @@ def FwdFilterEM(y, delta, x_init, sigma2_init, sigma2e, mu):
         # allv_logs[t] = -2*next_pred_error
         # print t, x_post[t], sigma2_post[t] , y[t-1]
 
-    ape = 0  # next_pred_error.mean()
+    # REVIEW: ape is the average prediction error, and it is always 0 -- the
+    # lines that would compute it are commented out above. No caller reads it,
+    # so nothing is wrong today, but the returned value means nothing.
+    ape = 0
 
-    # allv_logs.mean()
     return x_prior, x_post, sigma2_prior, sigma2_post, ape
 
 
