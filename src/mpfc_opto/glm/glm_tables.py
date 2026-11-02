@@ -274,6 +274,7 @@ class GLMStorage(SpyglassMixin, dj.Computed):
         path_cols = [
             "time",
             "linear_position",
+            "trajectory_progress",
             "track_segment_id",
             "upcoming_turn",
         ] + list(path_type_dummies.columns)
